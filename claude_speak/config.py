@@ -64,6 +64,7 @@ class NormalizationConfig:
     expand_abbreviations: bool = True
     shorten_paths: bool = True
     custom_pronunciations: str = ""  # path to custom pronunciations.toml (empty = use default)
+    context_aware: bool = True  # insert SSML tags based on detected content type
 
 
 @dataclass

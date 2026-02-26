@@ -1229,11 +1229,102 @@ def apply_pronunciation_overrides(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Context-aware speech annotation
+# ---------------------------------------------------------------------------
+
+# Patterns for content type detection
+_RE_ERROR_LINE = re.compile(
+    r"^(.*?\b(?:error|failed|failure|exception|traceback|fatal|critical|abort(?:ed)?|panic|segfault)\b.*)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_RE_HEADING_LINE = re.compile(
+    r"^([A-Z][A-Za-z0-9 /&,\-]{2,60}):?\s*$",
+    re.MULTILINE,
+)
+_RE_CODE_DESCRIPTION = re.compile(
+    r"^(.*?\b(?:function|method|class|variable|module|parameter|argument|returns?|takes?|accepts?|implements?|defines?|calls?|invokes?|initializ(?:es?|ing)|constructor|decorator|import(?:s|ing)?)\b.*)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_RE_LIST_ITEM_LINE = re.compile(
+    r"^((?:First|Second|Third|Fourth|Fifth|Sixth|Seventh|Eighth|Ninth|Tenth|Number \d+),\s.+\.)$",
+    re.MULTILINE,
+)
+
+
+def annotate_context(text: str) -> str:
+    """Insert SSML tags based on detected content type.
+
+    Content types detected:
+      - **error_message**: lines containing "error", "failed", "exception", etc.
+        get a brief pause before them and are wrapped in ``<slow>`` for emphasis.
+      - **code_description**: lines describing code constructs (function, class,
+        variable, etc.) are wrapped in ``<slow>`` for slightly slower delivery.
+      - **heading**: short title-like lines (capitalized, standalone) get a
+        pause inserted after them.
+      - **list_item**: ordinal list items (produced by ``improve_lists``) get a
+        brief pause inserted between consecutive items.
+
+    The function is designed to be idempotent when no patterns match —
+    plain text passes through unchanged.
+    """
+    if not text or not text.strip():
+        return text
+
+    # --- Error messages: pause before + slow ---
+    def _annotate_error(m: re.Match[str]) -> str:
+        line = m.group(1).strip()
+        # Avoid double-wrapping if already tagged
+        if "<slow>" in line or "<pause" in line:
+            return m.group(0)
+        return f"<pause 200ms><slow>{line}</slow>"
+    text = _RE_ERROR_LINE.sub(_annotate_error, text)
+
+    # --- Code descriptions: slow ---
+    def _annotate_code_desc(m: re.Match[str]) -> str:
+        line = m.group(1).strip()
+        if "<slow>" in line or "<pause" in line:
+            return m.group(0)
+        return f"<slow>{line}</slow>"
+    text = _RE_CODE_DESCRIPTION.sub(_annotate_code_desc, text)
+
+    # --- Headings: pause after ---
+    def _annotate_heading(m: re.Match[str]) -> str:
+        line = m.group(1).strip()
+        if "<pause" in line:
+            return m.group(0)
+        return f"{line}<pause 300ms>"
+    text = _RE_HEADING_LINE.sub(_annotate_heading, text)
+
+    # --- List items: pause between ---
+    # We insert a small pause before each list item (except the first one
+    # in a consecutive run, which already follows a heading/paragraph break).
+    lines = text.split("\n")
+    annotated_lines: list[str] = []
+    prev_was_list_item = False
+    for line in lines:
+        is_list_item = bool(_RE_LIST_ITEM_LINE.match(line.strip()))
+        if is_list_item and prev_was_list_item:
+            annotated_lines.append(f"<pause 150ms>{line}")
+        else:
+            annotated_lines.append(line)
+        prev_was_list_item = is_list_item
+    text = "\n".join(annotated_lines)
+
+    return text
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def normalize(text: str) -> str:
-    """Full normalization pipeline: raw text → speech-ready text."""
+def normalize(text: str, *, context_aware: bool = True) -> str:
+    """Full normalization pipeline: raw text → speech-ready text.
+
+    Parameters:
+        text: The raw text to normalize.
+        context_aware: When True (default), apply context-aware SSML
+            annotations after normalization.  Set to False to skip.
+    """
     text = describe_code_blocks(text)
     text = narrate_tables(text)
     text = improve_lists(text)
@@ -1259,6 +1350,8 @@ def normalize(text: str) -> str:
     text = clean_technical_punctuation(text) # existing (with fixes)
     text = final_cleanup(text)             # existing
     text = apply_pronunciation_overrides(text)  # pronunciation dictionary — final pass
+    if context_aware:
+        text = annotate_context(text)  # context-aware SSML annotation — after all normalization
     return text
 
 
