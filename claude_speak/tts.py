@@ -11,6 +11,7 @@ import time
 import numpy as np
 from pathlib import Path
 
+from .audio_devices import get_device_manager
 from .config import Config
 
 logger = logging.getLogger(__name__)
@@ -24,9 +25,6 @@ except ImportError:
         "(PortAudio must also be installed: brew install portaudio)"
     )
     sys.exit(1)
-
-_DEVICE_RESOLVE_INTERVAL = 30  # seconds between audio device re-checks
-
 
 def _get_onnx_providers() -> list[str]:
     """Return ONNX Runtime execution providers, preferring CoreML on Apple Silicon."""
@@ -53,7 +51,6 @@ class TTSEngine:
         self._output_device = None
         self._stream = None
         self._sample_rate = None
-        self._last_device_resolve = 0.0
         self._stream_lock = threading.Lock()  # protects _stream creation/destruction
         self._stopped = threading.Event()  # signals _write_samples to bail immediately
         self._voice_style = None  # resolved in load() — string or numpy blend array
@@ -100,11 +97,12 @@ class TTSEngine:
         # so provider selection is logged for diagnostics but cannot be passed directly.
         self.kokoro = Kokoro(model_path, voices_path)
         self._voice_style = self._resolve_voice()
-        self._resolve_device()
+        dm = get_device_manager()
+        self._output_device = dm.resolve_output(self.config.tts.device)
         logger.info(
             "Ready. Voice: %s, Lang: %s, Speed: %s, Device: %s",
             self.config.tts.voice, self.config.tts.lang,
-            self.config.tts.speed, self._device_name(),
+            self.config.tts.speed, dm.get_device_name(self._output_device),
         )
 
     def _resolve_voice(self):
@@ -147,30 +145,6 @@ class TTSEngine:
         logger.info("Voice blend: %s", names)
         return blend
 
-    def _resolve_device(self):
-        """Pick the output audio device."""
-        device_pref = self.config.tts.device
-
-        if device_pref and device_pref != "auto":
-            try:
-                self._output_device = int(device_pref)
-                return
-            except ValueError:
-                pass
-            for i, d in enumerate(sd.query_devices()):
-                if d["max_output_channels"] > 0 and device_pref.lower() in d["name"].lower():
-                    self._output_device = i
-                    return
-
-        self._output_device = sd.default.device[1]
-
-    def _device_name(self) -> str:
-        try:
-            info = sd.query_devices(self._output_device)
-            return info["name"]
-        except Exception:
-            return f"device {self._output_device}"
-
     def _ensure_stream(self, sample_rate: int):
         """Create or reuse a persistent output stream for gapless playback.
 
@@ -200,13 +174,14 @@ class TTSEngine:
             # default devices after a disconnection (e.g. AirPods closed).
             delays = [0.1, 0.5, 1.0]
             last_err = None
+            dm = get_device_manager()
             for attempt in range(len(delays) + 1):
                 if attempt > 0:
-                    self._resolve_device()
+                    self._output_device = dm.resolve_output(self.config.tts.device)
                 device = self._output_device
                 # On final retry, fall back to default device
                 if attempt == len(delays):
-                    device = sd.default.device[1]
+                    device = dm.get_default_output()
                     logger.warning("Falling back to default output device (device %s)", device)
                 try:
                     self._stream = sd.OutputStream(
@@ -218,7 +193,7 @@ class TTSEngine:
                     )
                     self._stream.start()
                     if attempt > 0:
-                        logger.info("Audio stream recovered on device: %s", self._device_name())
+                        logger.info("Audio stream recovered on device: %s", dm.get_device_name(self._output_device))
                     return
                 except sd.PortAudioError as e:
                     last_err = e
@@ -269,7 +244,7 @@ class TTSEngine:
                         except Exception:
                             pass
                         self._stream = None
-                self._resolve_device()
+                self._output_device = get_device_manager().resolve_output(self.config.tts.device)
                 break
             except Exception:
                 # Stream was aborted by stop() — clean up
@@ -281,10 +256,8 @@ class TTSEngine:
 
     def _maybe_resolve_device(self):
         """Re-resolve device only every N seconds (not per chunk)."""
-        now = time.monotonic()
-        if now - self._last_device_resolve >= _DEVICE_RESOLVE_INTERVAL:
-            self._resolve_device()
-            self._last_device_resolve = now
+        dm = get_device_manager()
+        self._output_device = dm.maybe_resolve_output(self.config.tts.device)
 
     async def generate_audio(self, text: str) -> list[tuple[np.ndarray, int]]:
         """Generate audio samples without playing. Returns list of (samples, sample_rate)."""

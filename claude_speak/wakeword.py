@@ -16,6 +16,7 @@ import threading
 import time
 from typing import Callable, Optional
 
+from .audio_devices import get_device_manager
 from .config import WakeWordConfig
 
 logger = logging.getLogger(__name__)
@@ -41,21 +42,6 @@ def _sounddevice_available() -> bool:
         return True
     except ImportError:
         return False
-
-
-def _find_builtin_mic() -> Optional[int]:
-    """Find the built-in microphone device index."""
-    try:
-        import sounddevice as sd
-        for i, d in enumerate(sd.query_devices()):
-            if d["max_input_channels"] > 0:
-                name = d["name"].lower()
-                # Match common built-in mic names across Mac models
-                if any(kw in name for kw in ("macbook", "built-in", "internal")):
-                    return i
-    except Exception:
-        pass
-    return None
 
 
 class WakeWordListener:
@@ -253,7 +239,7 @@ class WakeWordListener:
             self._running_event.clear()
             return
 
-        self._builtin_mic_id = _find_builtin_mic()
+        self._builtin_mic_id = get_device_manager().find_builtin_mic()
         if self._builtin_mic_id is not None:
             logger.info("Built-in mic: device %d", self._builtin_mic_id)
 

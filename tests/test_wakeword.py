@@ -11,7 +11,8 @@ import numpy as np
 import pytest
 
 from claude_speak.config import WakeWordConfig
-from claude_speak.wakeword import WakeWordListener, _find_builtin_mic, _openwakeword_available, _sounddevice_available
+from claude_speak.audio_devices import AudioDeviceManager, get_device_manager
+from claude_speak.wakeword import WakeWordListener, _openwakeword_available, _sounddevice_available
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +269,7 @@ class TestLifecycle:
 # ---------------------------------------------------------------------------
 
 class TestFindBuiltinMic:
-    """Tests for the _find_builtin_mic helper."""
+    """Tests for find_builtin_mic via AudioDeviceManager."""
 
     def test_finds_macbook_mic(self):
         mock_sd = MagicMock()
@@ -276,8 +277,9 @@ class TestFindBuiltinMic:
             {"name": "AirPods Pro", "max_input_channels": 1},
             {"name": "MacBook Pro Microphone", "max_input_channels": 1},
         ]
+        dm = AudioDeviceManager()
         with patch.dict("sys.modules", {"sounddevice": mock_sd}):
-            result = _find_builtin_mic()
+            result = dm.find_builtin_mic()
             assert result == 1
 
     def test_returns_none_when_no_builtin(self):
@@ -285,6 +287,7 @@ class TestFindBuiltinMic:
         mock_sd.query_devices.return_value = [
             {"name": "AirPods Pro", "max_input_channels": 1},
         ]
+        dm = AudioDeviceManager()
         with patch.dict("sys.modules", {"sounddevice": mock_sd}):
-            result = _find_builtin_mic()
+            result = dm.find_builtin_mic()
             assert result is None
