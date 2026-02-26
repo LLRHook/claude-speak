@@ -23,6 +23,7 @@ LOG_FILE = PROJECT_DIR / "daemon.log"
 
 @dataclass
 class TTSConfig:
+    engine: str = "kokoro"  # "kokoro", "piper", "elevenlabs"
     voice: str = "af_sarah"  # single voice name or blend like "bm_george:60+bm_fable:40"
     speed: float = 1.0
     lang: str = "en-us"  # language code for Kokoro (en-us, en-gb, etc.)
@@ -31,6 +32,7 @@ class TTSConfig:
     voices_path: str = str(MODELS_DIR / "voices-v1.0.bin")
     max_chunk_chars: int = 400  # split text into chunks of this size
     volume: float = 1.0  # TTS speech volume (0.0-1.0)
+    elevenlabs_api_key: str = ""  # ElevenLabs API key (env var ELEVENLABS_API_KEY takes priority)
 
 
 @dataclass
@@ -61,6 +63,7 @@ class NormalizationConfig:
     expand_units: bool = True
     expand_abbreviations: bool = True
     shorten_paths: bool = True
+    custom_pronunciations: str = ""  # path to custom pronunciations.toml (empty = use default)
 
 
 @dataclass
@@ -69,6 +72,33 @@ class AudioConfig:
     greeting: str = "Ready."
     volume: float = 0.3
     bt_mic_workaround: bool = True  # use built-in mic when output is BT
+    media_keys_enabled: bool = True  # intercept hardware media keys for TTS control
+
+
+@dataclass
+class HotkeysConfig:
+    """Global keyboard shortcut configuration."""
+    enabled: bool = True
+    toggle_tts: str = "cmd+shift+s"
+    stop_playback: str = "cmd+shift+x"
+    voice_input: str = "cmd+shift+v"
+
+
+@dataclass
+class VoiceCommandsConfig:
+    """Configurable voice command words.
+
+    Each field maps a command action to the word/phrase used to trigger it.
+    Set a field to an empty string to disable that command.
+    """
+    pause: str = "pause"
+    resume: str = "resume"
+    repeat: str = "repeat"
+    louder: str = "louder"
+    quieter: str = "quieter"
+    faster: str = "faster"
+    slower: str = "slower"
+    stop: str = "stop"
 
 
 @dataclass
@@ -78,6 +108,8 @@ class Config:
     input: InputConfig = field(default_factory=InputConfig)
     normalization: NormalizationConfig = field(default_factory=NormalizationConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
+    hotkeys: HotkeysConfig = field(default_factory=HotkeysConfig)
+    voice_commands: VoiceCommandsConfig = field(default_factory=VoiceCommandsConfig)
 
 
 def load_config() -> Config:
@@ -122,6 +154,14 @@ def load_config() -> Config:
         for k, v in data["audio"].items():
             if hasattr(config.audio, k):
                 setattr(config.audio, k, v)
+    if "hotkeys" in data:
+        for k, v in data["hotkeys"].items():
+            if hasattr(config.hotkeys, k):
+                setattr(config.hotkeys, k, v)
+    if "voice_commands" in data:
+        for k, v in data["voice_commands"].items():
+            if hasattr(config.voice_commands, k):
+                setattr(config.voice_commands, k, v)
 
     # Override with env vars (highest priority)
     if os.environ.get("CLAUDE_SPEAK_VOICE"):
