@@ -39,6 +39,8 @@ from claude_speak.normalizer import (
     expand_temperature,
     expand_math_operators,
     expand_slash_pairs,
+    # Pronunciation dictionary
+    apply_pronunciation_overrides,
 )
 
 
@@ -963,6 +965,180 @@ def test_normalize_math():
 def test_normalize_slash_pair():
     result = normalize("Use true/false values")
     assert "true or false" in result
+
+
+# ===================================================================
+# Pronunciation Dictionary Tests
+# ===================================================================
+
+import claude_speak.normalizer as normalizer_module
+
+
+def _write_pron_file(path, content: str):
+    """Helper: write a TOML pronunciations file to *path*."""
+    path.write_bytes(content.encode())
+
+
+def test_pron_default_dict_loads(monkeypatch):
+    """Built-in pronunciations.toml should load and contain known terms."""
+    # Force cache miss so we re-read from the built-in file.
+    monkeypatch.setattr(normalizer_module, "_pron_cache", None)
+    # Make sure the user file is NOT present.
+    monkeypatch.setattr(normalizer_module, "_USER_PRON_PATH",
+                        normalizer_module._BUILTIN_PRON_PATH.parent / "nonexistent_user.toml")
+
+    result = apply_pronunciation_overrides("run kubectl now")
+    assert "kube control" in result
+    assert "kubectl" not in result
+
+
+def test_pron_default_nginx(monkeypatch):
+    """nginx should become 'engine X' from the built-in dict."""
+    monkeypatch.setattr(normalizer_module, "_pron_cache", None)
+    monkeypatch.setattr(normalizer_module, "_USER_PRON_PATH",
+                        normalizer_module._BUILTIN_PRON_PATH.parent / "nonexistent_user.toml")
+
+    result = apply_pronunciation_overrides("configure nginx")
+    assert "engine X" in result
+
+
+def test_pron_custom_file_overrides_default(tmp_path, monkeypatch):
+    """A custom pronunciations file should replace the built-in dict entirely."""
+    custom = tmp_path / "pronunciations.toml"
+    _write_pron_file(custom, '[terms]\nwidget = "wid jet"\n')
+
+    monkeypatch.setattr(normalizer_module, "_pron_cache", None)
+    monkeypatch.setattr(normalizer_module, "_USER_PRON_PATH", custom)
+
+    result = apply_pronunciation_overrides("use the widget now")
+    assert "wid jet" in result
+    # The built-in 'kubectl' key should NOT match because we loaded the custom file.
+    result2 = apply_pronunciation_overrides("run kubectl here")
+    assert "kubectl" in result2  # not overridden by the custom file
+
+
+def test_pron_whole_word_only(monkeypatch):
+    """Replacements must be whole-word — partial matches must not fire."""
+    custom_toml = '[terms]\nfoo = "REPLACED"\n'
+    import tempfile, pathlib
+    with tempfile.NamedTemporaryFile(suffix=".toml", delete=False, mode="wb") as fh:
+        fh.write(custom_toml.encode())
+        tmp_path = pathlib.Path(fh.name)
+
+    try:
+        monkeypatch.setattr(normalizer_module, "_pron_cache", None)
+        monkeypatch.setattr(normalizer_module, "_USER_PRON_PATH", tmp_path)
+
+        # "foo" inside "foobar" should NOT be replaced; standalone "foo" should.
+        result = apply_pronunciation_overrides("foobar is not foo")
+        assert "foobar" in result       # partial match preserved (no replacement inside word)
+        assert "REPLACED" in result     # standalone whole-word 'foo' was replaced
+        # The word "foobar" must NOT have been altered to "foobREPLACED" or similar.
+        assert "fooREPLACED" not in result
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def test_pron_case_insensitive_matching(tmp_path, monkeypatch):
+    """Keys should match regardless of case in the input text."""
+    custom = tmp_path / "pronunciations.toml"
+    _write_pron_file(custom, '[terms]\nkubectl = "kube control"\n')
+
+    monkeypatch.setattr(normalizer_module, "_pron_cache", None)
+    monkeypatch.setattr(normalizer_module, "_USER_PRON_PATH", custom)
+
+    assert "kube control" in apply_pronunciation_overrides("Kubectl apply")
+    assert "kube control" in apply_pronunciation_overrides("KUBECTL apply")
+    assert "kube control" in apply_pronunciation_overrides("kubectl apply")
+
+
+def test_pron_cache_reloads_on_mtime_change(tmp_path, monkeypatch):
+    """Cache should be invalidated and reloaded when the file's mtime changes."""
+    custom = tmp_path / "pronunciations.toml"
+    _write_pron_file(custom, '[terms]\nfizz = "fizz pop"\n')
+
+    monkeypatch.setattr(normalizer_module, "_pron_cache", None)
+    monkeypatch.setattr(normalizer_module, "_USER_PRON_PATH", custom)
+
+    result1 = apply_pronunciation_overrides("drink some fizz")
+    assert "fizz pop" in result1
+
+    # Overwrite the file with different content and bump mtime artificially.
+    _write_pron_file(custom, '[terms]\nbuzz = "buzz saw"\n')
+    # Touch the file to guarantee a new mtime even on fast filesystems.
+    import time as _time
+    new_mtime = custom.stat().st_mtime + 1
+    os.utime(custom, (new_mtime, new_mtime))
+
+    result2 = apply_pronunciation_overrides("drink some fizz now buzz")
+    # Old term should no longer be replaced (new file has different terms).
+    assert "fizz pop" not in result2
+    # New term should be replaced.
+    assert "buzz saw" in result2
+
+
+def test_pron_missing_user_file_uses_default(tmp_path, monkeypatch):
+    """When user file is absent, built-in dict is used gracefully."""
+    monkeypatch.setattr(normalizer_module, "_pron_cache", None)
+    # Point user path to a non-existent file.
+    monkeypatch.setattr(normalizer_module, "_USER_PRON_PATH",
+                        tmp_path / "does_not_exist.toml")
+
+    result = apply_pronunciation_overrides("start nginx")
+    # Built-in nginx pronunciation should still apply.
+    assert "engine X" in result
+
+
+def test_pron_empty_text(monkeypatch):
+    """Empty string should pass through unchanged."""
+    monkeypatch.setattr(normalizer_module, "_pron_cache", None)
+    monkeypatch.setattr(normalizer_module, "_USER_PRON_PATH",
+                        normalizer_module._BUILTIN_PRON_PATH.parent / "nonexistent_user.toml")
+    assert apply_pronunciation_overrides("") == ""
+
+
+def test_pron_no_match_passes_through(tmp_path, monkeypatch):
+    """Text with no matching terms should be returned unchanged."""
+    custom = tmp_path / "pronunciations.toml"
+    _write_pron_file(custom, '[terms]\nalpha = "alpha one"\n')
+
+    monkeypatch.setattr(normalizer_module, "_pron_cache", None)
+    monkeypatch.setattr(normalizer_module, "_USER_PRON_PATH", custom)
+
+    text = "nothing to replace here"
+    assert apply_pronunciation_overrides(text) == text
+
+
+def test_pron_wired_into_normalize_pipeline(monkeypatch):
+    """apply_pronunciation_overrides should be called as the final normalize() step."""
+    monkeypatch.setattr(normalizer_module, "_pron_cache", None)
+    monkeypatch.setattr(normalizer_module, "_USER_PRON_PATH",
+                        normalizer_module._BUILTIN_PRON_PATH.parent / "nonexistent_user.toml")
+
+    result = normalize("use kubectl to deploy")
+    assert "kube control" in result
+    assert "kubectl" not in result
+
+
+def test_pron_custom_pron_config_field():
+    """NormalizationConfig should have custom_pronunciations field."""
+    from claude_speak.config import NormalizationConfig
+    cfg = NormalizationConfig()
+    assert hasattr(cfg, "custom_pronunciations")
+    assert cfg.custom_pronunciations == ""
+
+
+def test_pron_custom_pron_config_overridable(tmp_path, monkeypatch):
+    """custom_pronunciations in config TOML should be readable."""
+    import claude_speak.config as config_module
+    custom_path = str(tmp_path / "my_prons.toml")
+    toml_content = f'[normalization]\ncustom_pronunciations = "{custom_path}"\n'.encode()
+    toml_file = tmp_path / "claude-speak.toml"
+    toml_file.write_bytes(toml_content)
+    monkeypatch.setattr(config_module, "CONFIG_PATH", toml_file)
+
+    cfg = config_module.load_config()
+    assert cfg.normalization.custom_pronunciations == custom_path
 
 
 # ===================================================================

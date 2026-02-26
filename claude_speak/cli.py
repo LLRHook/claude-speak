@@ -21,6 +21,11 @@ Usage:
     claude-speak uninstall --all  # Also remove ~/.claude-speak/ (models + config)
     claude-speak listen         # Start voice controller (wake word + auto-submit)
     claude-speak voice-input    # Trigger a single voice input cycle
+    claude-speak preview <voice>          # Speak a sample in the given voice
+    claude-speak preview "v1:60+v2:40"   # Speak a sample in a blended voice
+    claude-speak preview --all            # Speak a sample in every available voice
+    claude-speak train-wakeword "hey claude"     # Train a custom wake word model
+    claude-speak train-wakeword "hey claude" --samples 15
 """
 
 from __future__ import annotations
@@ -117,6 +122,35 @@ def cmd_voices() -> None:
     for v in voices:
         prefix = "-> " if v == config.tts.voice else "  "
         print(f"  {prefix}{v}")
+
+
+def cmd_preview(voice: str) -> None:
+    """Speak a short sample in the given voice, or all voices if voice is '--all'."""
+    import asyncio
+    import time as _time
+
+    config = load_config()
+    engine = TTSEngine(config)
+
+    if voice == "--all":
+        voices = engine.list_voices()
+        print(f"Previewing all {len(voices)} voices...")
+        for v in voices:
+            print(f"  {v}")
+            engine.config.tts.voice = v
+            engine._voice_style = engine._resolve_voice()
+            asyncio.run(engine.speak(f"This is {v}."))
+            _time.sleep(1)
+    else:
+        engine.config.tts.voice = voice
+        # load() will be called lazily on first speak(); we need the model loaded
+        # before _resolve_voice() can build a blend array, so ensure it now.
+        engine.load()
+        engine._voice_style = engine._resolve_voice()
+        # Build a friendly display name (replace underscores, strip prefix)
+        display = voice.replace("_", " ")
+        sample = f"Hello, this is {display}."
+        asyncio.run(engine.speak(sample))
 
 
 def cmd_enable() -> None:
@@ -218,6 +252,41 @@ def cmd_uninstall() -> None:
     uninstall(remove_models="--all" in sys.argv)
 
 
+def cmd_train_wakeword() -> None:
+    """Train a custom wake word model from recorded examples."""
+    from pathlib import Path
+
+    from .train_wakeword import train_wakeword
+
+    # Parse wake phrase (required positional after "train-wakeword")
+    if len(sys.argv) < 3:
+        print("Usage: claude-speak train-wakeword <wake-phrase> [--samples N] [--output PATH]")
+        sys.exit(1)
+
+    wake_phrase = sys.argv[2]
+    num_samples = 10
+    output_dir = None
+
+    # Parse optional flags
+    i = 3
+    while i < len(sys.argv):
+        if sys.argv[i] == "--samples" and i + 1 < len(sys.argv):
+            try:
+                num_samples = int(sys.argv[i + 1])
+            except ValueError:
+                print(f"Error: --samples requires an integer, got '{sys.argv[i + 1]}'")
+                sys.exit(1)
+            i += 2
+        elif sys.argv[i] == "--output" and i + 1 < len(sys.argv):
+            output_dir = Path(sys.argv[i + 1])
+            i += 2
+        else:
+            print(f"Unknown argument: {sys.argv[i]}")
+            sys.exit(1)
+
+    train_wakeword(wake_phrase, output_dir=output_dir, num_samples=num_samples)
+
+
 def cmd_config() -> None:
     """Print current config values from TOML."""
     config = load_config()
@@ -277,6 +346,11 @@ def main() -> None:
     elif cmd == "queue":
         text = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else ""
         cmd_queue(text)
+    elif cmd == "preview":
+        voice_arg = sys.argv[2] if len(sys.argv) > 2 else "--all"
+        cmd_preview(voice_arg)
+    elif cmd == "train-wakeword":
+        cmd_train_wakeword()
     else:
         print(f"Unknown command: {cmd}")
         print(__doc__)

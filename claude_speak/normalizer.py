@@ -5,7 +5,10 @@ Transforms Claude's markdown/technical text into speech-friendly prose.
 
 from __future__ import annotations
 
+import os
 import re
+from pathlib import Path
+from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Unit expansions
@@ -1125,6 +1128,107 @@ def final_cleanup(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Pronunciation dictionary — user-editable overrides
+# ---------------------------------------------------------------------------
+
+# Built-in default dictionary, shipped with the package.
+_BUILTIN_PRON_PATH = Path(__file__).resolve().parent / "data" / "pronunciations.toml"
+
+# User-level override file location.
+_USER_PRON_PATH = Path.home() / ".claude-speak" / "pronunciations.toml"
+
+# Cache: (dict_of_terms, source_path, mtime_at_load)
+# mtime is None when the built-in is used (it never changes at runtime).
+_pron_cache: Optional[tuple[dict[str, str], Path, Optional[float]]] = None
+
+
+def _load_toml_pronunciations(path: Path) -> dict[str, str]:
+    """Load [terms] section from a TOML pronunciations file."""
+    try:
+        import tomllib  # Python 3.11+
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ImportError:
+            return {}
+    try:
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+        return {k: str(v) for k, v in data.get("terms", {}).items()}
+    except Exception:
+        return {}
+
+
+def _get_pronunciation_dict() -> dict[str, str]:
+    """Return the cached pronunciation dictionary, reloading if the user file changed.
+
+    Resolution order:
+      1. ``~/.claude-speak/pronunciations.toml`` if it exists — loaded and
+         cached; reloaded automatically when its mtime changes.
+      2. The built-in ``claude_speak/data/pronunciations.toml`` (never reloaded
+         at runtime since it is part of the installed package).
+    """
+    global _pron_cache
+
+    if _USER_PRON_PATH.exists():
+        try:
+            current_mtime = _USER_PRON_PATH.stat().st_mtime
+        except OSError:
+            current_mtime = None
+
+        if (
+            _pron_cache is not None
+            and _pron_cache[1] == _USER_PRON_PATH
+            and _pron_cache[2] == current_mtime
+        ):
+            return _pron_cache[0]
+
+        terms = _load_toml_pronunciations(_USER_PRON_PATH)
+        _pron_cache = (terms, _USER_PRON_PATH, current_mtime)
+        return terms
+
+    # Fall back to built-in (cached once; mtime sentinel = None)
+    if _pron_cache is not None and _pron_cache[1] == _BUILTIN_PRON_PATH:
+        return _pron_cache[0]
+
+    terms = _load_toml_pronunciations(_BUILTIN_PRON_PATH)
+    _pron_cache = (terms, _BUILTIN_PRON_PATH, None)
+    return terms
+
+
+def apply_pronunciation_overrides(text: str) -> str:
+    """Replace known technical terms with their preferred spoken forms.
+
+    - Uses ``~/.claude-speak/pronunciations.toml`` when present, otherwise
+      falls back to the built-in ``claude_speak/data/pronunciations.toml``.
+    - The loaded dictionary is cached and reloaded only when the user file's
+      modification time changes.
+    - Matches whole words only (``\\b`` boundaries), case-insensitively on
+      the *key*, preserving surrounding text.
+    - Applied as the final normalization step so earlier transforms (unit
+      expansion, abbreviation expansion, etc.) do not interfere.
+
+    Examples::
+
+        >>> apply_pronunciation_overrides("run kubectl apply")
+        'run kube control apply'
+        >>> apply_pronunciation_overrides("start nginx now")
+        'start engine X now'
+    """
+    terms = _get_pronunciation_dict()
+    if not terms:
+        return text
+
+    # Sort by length descending so longer keys match before shorter prefixes.
+    for key in sorted(terms, key=len, reverse=True):
+        pattern = re.compile(r"\b" + re.escape(key) + r"\b", re.IGNORECASE)
+        replacement = terms[key]
+        text = pattern.sub(replacement, text)
+
+    return text
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1154,6 +1258,7 @@ def normalize(text: str) -> str:
     text = expand_slash_pairs(text)        # NEW
     text = clean_technical_punctuation(text) # existing (with fixes)
     text = final_cleanup(text)             # existing
+    text = apply_pronunciation_overrides(text)  # pronunciation dictionary — final pass
     return text
 
 
