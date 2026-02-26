@@ -71,6 +71,13 @@ class VoiceController:
           Read by:    voice-input-cycle thread (handle_stop, _on_wake_word).
           Protection: effectively immutable after __init__; safe without locks.
 
+      _interrupt_callback (callable | None)
+          Written by: main thread (constructor only).
+          Read by:    voice-input-cycle thread (_on_wake_word).
+          Protection: effectively immutable after __init__; safe without locks.
+          Called when the wake word is detected during active TTS playback to
+          stop the engine, clear the queue, and transition to voice input.
+
     Sentinel files (MUTE_FILE, PLAYING_FILE)
     -----------------------------------------
     File-based signalling between the daemon main loop and the voice
@@ -89,10 +96,12 @@ class VoiceController:
         config: Optional[Config] = None,
         tts_stop_callback: Optional[callable] = None,
         voice_command_callback: Optional[callable] = None,
+        interrupt_callback: Optional[callable] = None,
     ) -> None:
         self._config = config or load_config()
         self._tts_stop_callback = tts_stop_callback
         self._voice_command_callback = voice_command_callback
+        self._interrupt_callback = interrupt_callback
 
         self._wakeword_listener: Optional[WakeWordListener] = None
         self._running = False
@@ -258,8 +267,7 @@ class VoiceController:
         """Callback invoked when the wake word is detected.
 
         Context-aware:
-          - TTS playing → mute (stop audio, keep position)
-          - TTS muted → unmute
+          - TTS playing → interrupt (stop TTS, clear queue, start voice input)
           - TTS idle → start voice input
 
         Serialization: _input_lock in _handle_wake is the real guard against
@@ -269,11 +277,9 @@ class VoiceController:
         if not self._running:
             return
 
-        # If TTS is currently playing, toggle mute.
+        # If TTS is currently playing, interrupt and transition to voice input.
         # Sentinel file checks: POSIX guarantees that exists(), touch(),
         # and unlink() each execute atomically at the syscall level.
-        # The exists()-then-act pattern has a benign TOCTOU race — at
-        # worst we double-toggle, which self-corrects on the next wake.
         try:
             tts_playing = PLAYING_FILE.exists()
         except OSError as e:
@@ -281,20 +287,27 @@ class VoiceController:
             tts_playing = False
 
         if tts_playing:
+            logger.info("Wake word during TTS playback — interrupting")
+            # Fire the interrupt callback (engine.stop + queue.clear) for
+            # immediate silence.  This is the fast path (< 100ms target).
+            if self._interrupt_callback is not None:
+                try:
+                    self._interrupt_callback()
+                except Exception as e:
+                    logger.error("Error in interrupt callback: %s", e)
+            # Clean up sentinel files so the daemon doesn't think TTS is
+            # still active.
             try:
-                if MUTE_FILE.exists():
-                    MUTE_FILE.unlink(missing_ok=True)
-                    logger.info("TTS unmuted (resume)")
-                else:
-                    MUTE_FILE.touch()
-                    if self._tts_stop_callback is not None:
-                        self._tts_stop_callback()
-                    logger.info("TTS muted (paused)")
+                PLAYING_FILE.unlink(missing_ok=True)
             except OSError as e:
-                logger.warning("Failed to toggle mute sentinel: %s", e)
-            return
+                logger.warning("Failed to remove playing sentinel: %s", e)
+            try:
+                MUTE_FILE.unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning("Failed to remove mute sentinel: %s", e)
+            # Fall through to start voice input immediately (no return).
 
-        # TTS is idle → start voice input
+        # Start voice input.
         # _handle_wake acquires _input_lock (non-blocking) so concurrent
         # spawns are harmless — the second thread exits immediately.
         thread = threading.Thread(
