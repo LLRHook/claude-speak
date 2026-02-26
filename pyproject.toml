@@ -32,14 +32,24 @@ dependencies = [
     "sounddevice>=0.4",
     "numpy>=1.24",
     "onnxruntime>=1.16",
+    "tomli>=1.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
 wakeword = [
     "openwakeword>=0.6",
 ]
+piper = [
+    "piper-tts>=2023.11.14",
+]
 stt = [
     "mlx-whisper>=0.4",
+]
+elevenlabs = [
+    "elevenlabs>=1.0",
+]
+macos-extras = [
+    "pyobjc-framework-Quartz>=9.0",
 ]
 dev = [
     "ruff",

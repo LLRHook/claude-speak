@@ -1,6 +1,7 @@
 """
 Model management for claude-speak.
-Downloads and caches Kokoro TTS model files to ~/.claude-speak/models/.
+Downloads and caches TTS model files to ~/.claude-speak/models/.
+Supports Kokoro and Piper voice models.
 """
 
 from __future__ import annotations
@@ -57,6 +58,60 @@ MODEL_REGISTRY: dict[str, ModelInfo] = {
         size_bytes=0,  # skip size check — small model (~2 MB), size may change between versions
     ),
 }
+
+# ---------------------------------------------------------------------------
+# Piper voice model registry
+# ---------------------------------------------------------------------------
+
+_PIPER_HF_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
+
+
+@dataclass(frozen=True)
+class PiperVoiceInfo:
+    """Metadata for a downloadable Piper voice model.
+
+    Each Piper voice consists of an ONNX model file and a companion JSON config.
+    """
+
+    name: str  # e.g. "en_US-lessac-medium"
+    description: str
+    onnx_url: str
+    config_url: str  # .onnx.json companion file
+
+
+def _piper_urls(voice_name: str) -> tuple[str, str]:
+    """Derive HuggingFace download URLs from a Piper voice name.
+
+    Voice names follow the pattern ``{lang}_{REGION}-{speaker}-{quality}``.
+    The HF path is ``{lang_lower}/{lang_REGION}/{speaker}/{quality}/{voice_name}.onnx``.
+    """
+    # e.g. "en_US-lessac-medium" -> lang_region="en_US", speaker="lessac", quality="medium"
+    lang_region, speaker, quality = voice_name.rsplit("-", 2)
+    lang_lower = lang_region.split("_")[0]  # "en"
+    base = f"{_PIPER_HF_BASE}/{lang_lower}/{lang_region}/{speaker}/{quality}"
+    onnx_url = f"{base}/{voice_name}.onnx"
+    config_url = f"{base}/{voice_name}.onnx.json"
+    return onnx_url, config_url
+
+
+PIPER_VOICES: dict[str, PiperVoiceInfo] = {}
+
+_piper_voice_defs = [
+    ("en_US-lessac-medium", "US English, Lessac (female, general purpose)"),
+    ("en_US-ryan-medium", "US English, Ryan (male)"),
+    ("en_GB-alan-medium", "British English, Alan (male)"),
+]
+
+for _name, _desc in _piper_voice_defs:
+    _onnx, _cfg = _piper_urls(_name)
+    PIPER_VOICES[_name] = PiperVoiceInfo(
+        name=_name,
+        description=_desc,
+        onnx_url=_onnx,
+        config_url=_cfg,
+    )
+
+PIPER_MODELS_DIR: Path = Path.home() / ".claude-speak" / "models" / "piper"
 
 # ---------------------------------------------------------------------------
 # STT (Whisper) model registry
@@ -221,3 +276,62 @@ def ensure_stt_model(model_size: str = "base") -> str:
         log.warning("STT model pre-download encountered an error: %s", exc)
 
     return hf_repo
+
+
+# ---------------------------------------------------------------------------
+# Piper model helpers
+# ---------------------------------------------------------------------------
+
+
+def download_piper_voice(voice_name: str, dest_dir: Path | None = None) -> Path:
+    """Download a Piper voice model (.onnx + .onnx.json) and return the .onnx path.
+
+    Skips download if the .onnx file already exists.
+    """
+    if dest_dir is None:
+        dest_dir = PIPER_MODELS_DIR
+
+    if voice_name not in PIPER_VOICES:
+        raise ValueError(
+            f"Unknown Piper voice {voice_name!r}. "
+            f"Available: {list(PIPER_VOICES)}"
+        )
+
+    info = PIPER_VOICES[voice_name]
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    onnx_path = dest_dir / f"{voice_name}.onnx"
+    config_path = dest_dir / f"{voice_name}.onnx.json"
+
+    for url, path in [(info.onnx_url, onnx_path), (info.config_url, config_path)]:
+        if path.exists():
+            log.info("Piper file %s already present, skipping.", path.name)
+            continue
+        log.info("Downloading %s ...", url)
+        tmp = path.with_suffix(path.suffix + ".part")
+        try:
+            urllib.request.urlretrieve(url, str(tmp), reporthook=_progress_hook)
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        tmp.rename(path)
+        log.info("Saved %s.", path.name)
+
+    return onnx_path
+
+
+def list_downloaded_piper_voices(dest_dir: Path | None = None) -> list[str]:
+    """Return names of Piper voices that have been downloaded (both .onnx and .onnx.json present)."""
+    if dest_dir is None:
+        dest_dir = PIPER_MODELS_DIR
+    if not dest_dir.exists():
+        return []
+    voices = []
+    for onnx_file in sorted(dest_dir.glob("*.onnx")):
+        config_file = onnx_file.with_suffix(".onnx.json")
+        if config_file.exists():
+            # Strip ".onnx" to get the voice name
+            voices.append(onnx_file.stem)
+    return voices
