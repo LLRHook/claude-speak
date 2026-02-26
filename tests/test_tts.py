@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import numpy as np
 import pytest
 
+from claude_speak.audio_devices import AudioDeviceManager
 from claude_speak.config import Config, TTSConfig
 
 # Import the sd module reference so we can patch it on the tts module
@@ -95,46 +96,42 @@ class TestResolveVoice:
 # ---------------------------------------------------------------------------
 
 class TestResolveDevice:
-    """Tests for _resolve_device."""
+    """Tests for device resolution via AudioDeviceManager (delegated from TTSEngine)."""
 
     def test_auto_device_uses_default(self):
-        """device='auto' should use sounddevice default."""
-        mock_sd = _mock_sd()
-        mock_sd.default.device = (0, 5)
-        with patch.object(tts_module, "sd", mock_sd):
+        """device='auto' should use sounddevice default via device manager."""
+        mock_dm = MagicMock(spec=AudioDeviceManager)
+        mock_dm.resolve_output.return_value = 5
+        mock_dm.get_device_name.return_value = "Built-in Speaker"
+        with patch("claude_speak.tts.get_device_manager", return_value=mock_dm):
             engine = _make_engine(device="auto")
-            engine._resolve_device()
-            assert engine._output_device == 5
+            engine._maybe_resolve_device()
+            mock_dm.maybe_resolve_output.assert_called_once_with("auto")
 
     def test_device_by_numeric_id(self):
-        mock_sd = _mock_sd()
-        with patch.object(tts_module, "sd", mock_sd):
+        mock_dm = MagicMock(spec=AudioDeviceManager)
+        mock_dm.resolve_output.return_value = 3
+        with patch("claude_speak.tts.get_device_manager", return_value=mock_dm):
             engine = _make_engine(device="3")
-            engine._resolve_device()
-            assert engine._output_device == 3
+            engine._maybe_resolve_device()
+            mock_dm.maybe_resolve_output.assert_called_once_with("3")
 
     def test_device_by_name_substring(self):
-        """Match device by name substring (case-insensitive)."""
-        mock_sd = _mock_sd()
-        mock_sd.query_devices.return_value = [
-            {"name": "Built-in Speaker", "max_output_channels": 2},
-            {"name": "AirPods Pro", "max_output_channels": 2},
-        ]
-        with patch.object(tts_module, "sd", mock_sd):
+        """Match device by name substring via device manager."""
+        mock_dm = MagicMock(spec=AudioDeviceManager)
+        mock_dm.resolve_output.return_value = 1
+        with patch("claude_speak.tts.get_device_manager", return_value=mock_dm):
             engine = _make_engine(device="airpods")
-            engine._resolve_device()
-            assert engine._output_device == 1
+            engine._maybe_resolve_device()
+            mock_dm.maybe_resolve_output.assert_called_once_with("airpods")
 
     def test_device_name_not_found_falls_back_to_default(self):
-        mock_sd = _mock_sd()
-        mock_sd.query_devices.return_value = [
-            {"name": "Built-in Speaker", "max_output_channels": 2},
-        ]
-        mock_sd.default.device = (0, 0)
-        with patch.object(tts_module, "sd", mock_sd):
+        mock_dm = MagicMock(spec=AudioDeviceManager)
+        mock_dm.resolve_output.return_value = 0
+        with patch("claude_speak.tts.get_device_manager", return_value=mock_dm):
             engine = _make_engine(device="nonexistent")
-            engine._resolve_device()
-            assert engine._output_device == 0
+            engine._maybe_resolve_device()
+            mock_dm.maybe_resolve_output.assert_called_once_with("nonexistent")
 
 
 # ---------------------------------------------------------------------------
@@ -307,13 +304,17 @@ class TestPlayAudio:
     def test_play_audio_calls_ensure_stream_and_write(self):
         engine = _make_engine()
         engine._output_device = 0
-        engine._last_device_resolve = 0.0
 
         mock_sd = _mock_sd()
         mock_stream = MagicMock(active=True)
         mock_sd.OutputStream.return_value = mock_stream
 
-        with patch.object(tts_module, "sd", mock_sd):
+        mock_dm = MagicMock(spec=AudioDeviceManager)
+        mock_dm.maybe_resolve_output.return_value = 0
+        mock_dm.get_default_output.return_value = 0
+
+        with patch.object(tts_module, "sd", mock_sd), \
+             patch("claude_speak.tts.get_device_manager", return_value=mock_dm):
             segments = [
                 (np.zeros(100, dtype=np.float32), 24000),
                 (np.zeros(200, dtype=np.float32), 24000),
@@ -347,52 +348,25 @@ class TestListVoices:
 
 
 # ---------------------------------------------------------------------------
-# Tests: device name
-# ---------------------------------------------------------------------------
-
-class TestDeviceName:
-    """Tests for _device_name."""
-
-    def test_device_name_success(self):
-        mock_sd = _mock_sd()
-        mock_sd.query_devices.return_value = {"name": "AirPods Pro"}
-        with patch.object(tts_module, "sd", mock_sd):
-            engine = _make_engine()
-            engine._output_device = 1
-            assert engine._device_name() == "AirPods Pro"
-
-    def test_device_name_fallback_on_error(self):
-        mock_sd = _mock_sd()
-        mock_sd.query_devices.side_effect = Exception("no device")
-        with patch.object(tts_module, "sd", mock_sd):
-            engine = _make_engine()
-            engine._output_device = 99
-            assert engine._device_name() == "device 99"
-
-
-# ---------------------------------------------------------------------------
-# Tests: _maybe_resolve_device
+# Tests: _maybe_resolve_device (delegates to AudioDeviceManager)
 # ---------------------------------------------------------------------------
 
 class TestMaybeResolveDevice:
-    """Tests for _maybe_resolve_device."""
+    """Tests for _maybe_resolve_device delegation to AudioDeviceManager."""
 
-    def test_resolves_on_first_call(self):
-        mock_sd = _mock_sd()
-        with patch.object(tts_module, "sd", mock_sd):
-            engine = _make_engine()
-            engine._last_device_resolve = 0.0
+    def test_delegates_to_device_manager(self):
+        mock_dm = MagicMock(spec=AudioDeviceManager)
+        mock_dm.maybe_resolve_output.return_value = 7
+        with patch("claude_speak.tts.get_device_manager", return_value=mock_dm):
+            engine = _make_engine(device="auto")
             engine._maybe_resolve_device()
-            # Should have resolved (checked sd.default or sd.query_devices)
-            assert engine._last_device_resolve > 0
+            mock_dm.maybe_resolve_output.assert_called_once_with("auto")
+            assert engine._output_device == 7
 
-    def test_skips_if_recently_resolved(self):
-        import time
-        mock_sd = _mock_sd()
-        with patch.object(tts_module, "sd", mock_sd):
-            engine = _make_engine()
-            engine._last_device_resolve = time.monotonic()
-            engine._output_device = 42
+    def test_passes_device_preference(self):
+        mock_dm = MagicMock(spec=AudioDeviceManager)
+        mock_dm.maybe_resolve_output.return_value = 3
+        with patch("claude_speak.tts.get_device_manager", return_value=mock_dm):
+            engine = _make_engine(device="airpods")
             engine._maybe_resolve_device()
-            # Should NOT have re-resolved (too recent)
-            assert engine._output_device == 42
+            mock_dm.maybe_resolve_output.assert_called_once_with("airpods")
