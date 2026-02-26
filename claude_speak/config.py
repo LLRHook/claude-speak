@@ -3,13 +3,15 @@ Configuration loader for claude-speak.
 Reads claude-speak.toml and provides defaults.
 """
 
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = PROJECT_DIR / "claude-speak.toml"
-MODELS_DIR = PROJECT_DIR / "models"
+MODELS_DIR = Path.home() / ".claude-speak" / "models"
 WAKEWORD_DIR = PROJECT_DIR / "wakeword"
 QUEUE_DIR = Path("/tmp/claude-speak-queue")
 PID_FILE = Path("/tmp/claude-speak-daemon.pid")
@@ -39,7 +41,7 @@ class WakeWordConfig:
     stop_model: str = ""  # path to stop.onnx for instant stop detection
     sensitivity: float = 0.5
     stop_sensitivity: float = 0.5  # separate threshold for stop model
-    stop_phrases: list = field(default_factory=lambda: ["stop", "quiet", "shut up"])
+    stop_phrases: list[str] = field(default_factory=lambda: ["stop", "quiet", "shut up"])
 
 
 @dataclass
@@ -124,5 +126,14 @@ def load_config() -> Config:
         config.tts.speed = float(os.environ["CLAUDE_SPEAK_SPEED"])
     if os.environ.get("CLAUDE_SPEAK_DEVICE"):
         config.tts.device = os.environ["CLAUDE_SPEAK_DEVICE"]
+
+    # Resolve model paths: fall back to project-local models/ if user-level missing
+    _LOCAL_MODELS = PROJECT_DIR / "models"
+    for attr in ("model_path", "voices_path"):
+        path = Path(getattr(config.tts, attr))
+        if not path.exists() and _LOCAL_MODELS.exists():
+            local = _LOCAL_MODELS / path.name
+            if local.exists():
+                setattr(config.tts, attr, str(local))
 
     return config

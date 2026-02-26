@@ -1,6 +1,20 @@
 #!/bin/bash
 # install.sh — Automated setup for claude-speak
 # Safe to run multiple times (idempotent).
+
+# --- Deprecation Notice ---
+echo ""
+echo "⚠️  install.sh is deprecated and will be removed in a future version."
+echo "   Please use the new setup flow instead:"
+echo ""
+echo "     pip install claude-speak"
+echo "     claude-speak setup"
+echo ""
+echo "   Continuing with legacy installation in 5 seconds..."
+echo "   Press Ctrl+C to abort."
+echo ""
+sleep 5
+
 set -euo pipefail
 
 # ---------------------------------------------------------------------------

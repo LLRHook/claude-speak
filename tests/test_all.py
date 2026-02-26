@@ -7,16 +7,11 @@ Covers:
     - src/config.py      (TOML config loader)
 """
 
-import sys
 import os
 import time
 from pathlib import Path
 
-# Ensure the project root is on sys.path so `src.*` imports work.
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
-from src.normalizer import (
+from claude_speak.normalizer import (
     expand_units,
     expand_abbreviations,
     expand_stop_words,
@@ -974,7 +969,7 @@ def test_normalize_slash_pair():
 # Queue Tests
 # ===================================================================
 
-import src.queue as queue_module
+import claude_speak.queue as queue_module
 
 
 def test_enqueue_creates_file(tmp_path, monkeypatch):
@@ -1081,8 +1076,8 @@ def test_fifo_ordering(tmp_path, monkeypatch):
 # Config Tests
 # ===================================================================
 
-import src.config as config_module
-from src.config import load_config, Config, TTSConfig
+import claude_speak.config as config_module
+from claude_speak.config import load_config, Config, TTSConfig
 
 
 def test_load_config_defaults_when_no_file(tmp_path, monkeypatch):

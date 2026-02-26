@@ -61,6 +61,12 @@ greeting = "Ready."
 # Does not affect TTS voice output volume.
 volume = 0.3
 
+[daemon]
+# Logging level: DEBUG, INFO, WARNING, ERROR.
+# DEBUG enables performance timing logs (previously gated by CLAUDE_SPEAK_PERF).
+# Can also be set via CLAUDE_SPEAK_LOG_LEVEL env var (takes priority).
+log_level = "INFO"
+
 [normalization]
 # Text normalization rules applied before sending text to TTS.
 # These improve spoken output quality by cleaning up code-heavy responses.

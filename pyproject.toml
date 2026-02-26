@@ -1,6 +1,9 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["claude_speak*"]
 
 [project]
 name = "claude-speak"
@@ -11,19 +14,64 @@ license = {text = "MIT"}
 authors = [
     {name = "Victor Ivanov", email = "victor.n.ivanov@gmail.com"},
 ]
+readme = "README.md"
+keywords = ["claude", "tts", "voice", "speech", "kokoro", "claude-code"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Operating System :: MacOS",
+]
 
 dependencies = [
     "kokoro-onnx>=0.4",
     "sounddevice>=0.4",
     "numpy>=1.24",
-    "openwakeword>=0.6",
     "onnxruntime>=1.16",
 ]
 
 [project.optional-dependencies]
-test = [
+wakeword = [
+    "openwakeword>=0.6",
+]
+dev = [
+    "ruff",
     "pytest",
+    "mypy",
+    "pre-commit",
+]
+train = [
+    "torch",
+    "scipy",
+    "soundfile",
+    "tqdm",
 ]
 
 [project.scripts]
-claude-speak = "cli:main"
+claude-speak = "claude_speak.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/vnicivanov/claude-speak"
+Repository = "https://github.com/vnicivanov/claude-speak"
+Issues = "https://github.com/vnicivanov/claude-speak/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "requires_model: marks tests that require a model to be present",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402", "E501", "F401", "I001", "B011", "SIM300"]

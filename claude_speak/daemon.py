@@ -8,6 +8,8 @@ chunks long messages, and plays audio sequentially.
 
 import asyncio
 import fcntl
+import logging
+import logging.handlers
 import os
 import signal
 import subprocess
@@ -21,7 +23,8 @@ from .tts import TTSEngine
 from .chimes import play_ready_chime, play_error_chime, play_stop_chime
 from . import queue as Q
 
-PERF_LOG = os.environ.get("CLAUDE_SPEAK_PERF", "").lower() in ("1", "true", "yes")
+logger = logging.getLogger(__name__)
+
 POLL_INTERVAL = 0.1  # fallback; SIGUSR1 from hook triggers instant processing
 LOCK_FILE = Path("/tmp/claude-speak-daemon.lock")
 START_TS_FILE = Path("/tmp/claude-speak-daemon.start_ts")
@@ -45,16 +48,15 @@ def _try_reload_config(config: Config, engine: TTSEngine, last_mtime: float) -> 
     if current_mtime == last_mtime:
         return config, last_mtime
 
-    print("[daemon] Config file changed, reloading...", flush=True)
+    logger.info("Config file changed, reloading...")
     new_config = load_config()
 
     # Update engine settings
     engine.config = new_config
     engine._resolve_device()
-    print(
-        f"[daemon] Reloaded config — voice={new_config.tts.voice}, "
-        f"speed={new_config.tts.speed}, device={new_config.tts.device}",
-        flush=True,
+    logger.info(
+        "Reloaded config — voice=%s, speed=%s, device=%s",
+        new_config.tts.voice, new_config.tts.speed, new_config.tts.device,
     )
     return new_config, current_mtime
 
@@ -68,7 +70,7 @@ async def _wait_for_unmute(poll: float = 0.2) -> None:
 async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
     """Main loop: watch queue, normalize, chunk, speak."""
     Q.ensure_queue_dir()
-    print(f"[daemon] Watching queue: {QUEUE_DIR}", flush=True)
+    logger.info("Watching queue: %s", QUEUE_DIR)
 
     # SIGUSR1 from hook signals "new item in queue" — skip poll delay
     queue_ready = asyncio.Event()
@@ -112,19 +114,18 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
             continue
 
         # Measure time from queue file creation to pickup
-        if PERF_LOG:
-            try:
-                queue_ts = float(filepath.stem)
-                pickup_delay = time.time() - queue_ts
-                print(f"[perf] queue->pickup: {pickup_delay:.3f}s", flush=True)
-            except (ValueError, AttributeError):
-                pass
+        try:
+            queue_ts = float(filepath.stem)
+            pickup_delay = time.time() - queue_ts
+            logger.debug("queue->pickup: %.3fs", pickup_delay)
+        except (ValueError, AttributeError):
+            pass
 
         t0 = time.monotonic()
 
         # Stop word handling: if text is only a stop phrase, abort playback
         if _is_stop_command(text, config.wakeword.stop_phrases):
-            print("[daemon] Stop command received, aborting playback.", flush=True)
+            logger.info("Stop command received, aborting playback.")
             engine.stop()
             Q.clear()
             if config.audio.chimes:
@@ -132,23 +133,21 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
             continue
 
         try:
-            print(f"[daemon] Processing ({len(text)} chars)...", flush=True)
+            logger.info("Processing (%d chars)...", len(text))
 
             # Normalize for speech
             normalized = normalize(text)
             t_norm = time.monotonic()
-            if PERF_LOG:
-                print(f"[perf] normalize: {(t_norm - t0)*1000:.0f}ms", flush=True)
+            logger.debug("normalize: %.0fms", (t_norm - t0) * 1000)
 
             if not normalized:
-                print("[daemon] Empty after normalization, skipping.", flush=True)
+                logger.info("Empty after normalization, skipping.")
                 continue
 
             # Chunk for reliable TTS (Kokoro struggles with very long text)
             chunks = chunk_text(normalized, max_chars=config.tts.max_chunk_chars)
             t_chunk = time.monotonic()
-            if PERF_LOG:
-                print(f"[perf] chunk: {(t_chunk - t_norm)*1000:.0f}ms ({len(chunks)} chunks)", flush=True)
+            logger.debug("chunk: %.0fms (%d chunks)", (t_chunk - t_norm) * 1000, len(chunks))
 
             # Mark as playing so VoiceController knows TTS is active
             PLAYING_FILE.touch()
@@ -161,20 +160,18 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
                     # Single chunk — stream directly (check mute before starting)
                     if TOGGLE_FILE.exists() and not MUTE_FILE.exists():
                         await engine.speak(chunks[0])
-                        if PERF_LOG:
-                            print(f"[perf] speak: {(time.monotonic() - t_chunk)*1000:.0f}ms", flush=True)
+                        logger.debug("speak: %.0fms", (time.monotonic() - t_chunk) * 1000)
                     elif MUTE_FILE.exists():
                         # Muted — wait for unmute, then play
-                        print("[daemon] Muted, waiting to resume...", flush=True)
+                        logger.info("Muted, waiting to resume...")
                         await _wait_for_unmute()
-                        print("[daemon] Resumed.", flush=True)
+                        logger.info("Resumed.")
                         await engine.speak(chunks[0])
                 else:
                     # Multiple chunks — generate next while current plays
                     next_audio = await engine.generate_audio(chunks[0])
                     t_gen = time.monotonic()
-                    if PERF_LOG:
-                        print(f"[perf] generate chunk[0]: {(t_gen - t_chunk)*1000:.0f}ms", flush=True)
+                    logger.debug("generate chunk[0]: %.0fms", (t_gen - t_chunk) * 1000)
 
                     for i in range(len(chunks)):
                         if not TOGGLE_FILE.exists():
@@ -183,9 +180,9 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
                         # Check mute before each chunk
                         if MUTE_FILE.exists():
                             engine.stop()
-                            print(f"[daemon] Muted at chunk {i}/{len(chunks)}, waiting...", flush=True)
+                            logger.info("Muted at chunk %d/%d, waiting...", i, len(chunks))
                             await _wait_for_unmute()
-                            print("[daemon] Resumed.", flush=True)
+                            logger.info("Resumed.")
 
                         current_audio = next_audio
 
@@ -193,11 +190,9 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
                             gen_task = asyncio.create_task(engine.generate_audio(chunks[i + 1]))
                             t_play = time.monotonic()
                             await asyncio.to_thread(engine.play_audio, current_audio)
-                            if PERF_LOG:
-                                print(f"[perf] play chunk[{i}]: {(time.monotonic() - t_play)*1000:.0f}ms", flush=True)
+                            logger.debug("play chunk[%d]: %.0fms", i, (time.monotonic() - t_play) * 1000)
                             next_audio = await gen_task
-                            if PERF_LOG:
-                                print(f"[perf] generate chunk[{i+1}]: ready", flush=True)
+                            logger.debug("generate chunk[%d]: ready", i + 1)
                         else:
                             await asyncio.to_thread(engine.play_audio, current_audio)
             finally:
@@ -208,14 +203,11 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
                     voice_controller._wakeword_listener.use_default_mic()
 
             t_done = time.monotonic()
-            if PERF_LOG:
-                print(f"[perf] TOTAL dequeue->done: {(t_done - t0)*1000:.0f}ms", flush=True)
-            print(f"[daemon] Done speaking.", flush=True)
+            logger.debug("TOTAL dequeue->done: %.0fms", (t_done - t0) * 1000)
+            logger.info("Done speaking.")
 
         except Exception as e:
-            import traceback
-            print(f"[daemon] Error: {e}", flush=True)
-            traceback.print_exc()
+            logger.error("Error processing queue item: %s", e, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +329,7 @@ def stop_daemon():
 
 
 def handle_shutdown(signum, frame):
-    print("\n[daemon] Shutting down...", flush=True)
+    logger.info("Shutting down...")
     PID_FILE.unlink(missing_ok=True)
     LOCK_FILE.unlink(missing_ok=True)
     START_TS_FILE.unlink(missing_ok=True)
@@ -355,6 +347,45 @@ def status():
     print(f"Queue:   {depth} items")
 
 
+def _configure_logging(config: Config, foreground: bool = False):
+    """Set up logging with RotatingFileHandler and optional StreamHandler.
+
+    Args:
+        config: Config object (used to read log_level).
+        foreground: If True, also log to stderr (for non-daemonized mode).
+    """
+    # Determine log level from env var (highest priority) or config
+    level_name = os.environ.get("CLAUDE_SPEAK_LOG_LEVEL", "") or getattr(config, "log_level", "INFO")
+    level = getattr(logging, level_name.upper(), logging.INFO)
+
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    # Remove any existing handlers (e.g. from basicConfig or prior calls)
+    root.handlers.clear()
+
+    # RotatingFileHandler: 5 MB max, 3 backups
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.handlers.RotatingFileHandler(
+        str(LOG_FILE),
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(fmt)
+    root.addHandler(file_handler)
+
+    # StreamHandler for foreground (non-daemonized) mode
+    if foreground:
+        stream_handler = logging.StreamHandler(sys.stderr)
+        stream_handler.setFormatter(fmt)
+        root.addHandler(stream_handler)
+
+
 def start(daemonize: bool = False):
     # Check PID file first (fast check)
     existing = read_pid()
@@ -368,16 +399,25 @@ def start(daemonize: bool = False):
     if daemonize:
         pid = os.fork()
         if pid > 0:
-            print(f"[daemon] Started (PID {pid})")
-            sys.exit(0)
+            print(f"[daemon] Started (PID {pid})", flush=True)
+            os._exit(0)  # Must use os._exit — sys.exit runs atexit handlers that can kill the child
         os.setsid()
-        log_fd = open(LOG_FILE, "a")
-        os.dup2(log_fd.fileno(), sys.stdout.fileno())
-        os.dup2(log_fd.fileno(), sys.stderr.fileno())
+
+        # Redirect stdin/stdout/stderr to /dev/null so the daemon survives
+        # after the parent (hook process) exits and closes the original fds.
+        devnull = os.open(os.devnull, os.O_RDWR)
+        os.dup2(devnull, 0)
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+
+    # Configure logging (must happen after fork so the child owns the handlers)
+    config_for_log = load_config()
+    _configure_logging(config_for_log, foreground=not daemonize)
 
     # Acquire exclusive lock AFTER fork (child process holds the lock)
     if not acquire_lock():
-        print("[daemon] Another instance holds the lock. Exiting.", flush=True)
+        logger.info("Another instance holds the lock. Exiting.")
         sys.exit(0)
 
     write_pid()
@@ -386,6 +426,7 @@ def start(daemonize: bool = False):
 
     config = load_config()
     engine = TTSEngine(config)
+    logger.info("Loading TTS engine (models will be auto-downloaded if missing)...")
     engine.load()
 
     # Session greeting: chime + spoken confirmation
@@ -395,9 +436,9 @@ def start(daemonize: bool = False):
         if config.audio.greeting:
             import asyncio as _aio
             _aio.run(engine.speak(config.audio.greeting))
-        print("[daemon] Greeting complete.", flush=True)
+        logger.info("Greeting complete.")
     except Exception as e:
-        print(f"[daemon] Greeting failed: {e}", flush=True)
+        logger.warning("Greeting failed: %s", e)
 
     # Start voice controller (wake word + voice input) if enabled
     voice_controller = None
@@ -406,9 +447,9 @@ def start(daemonize: bool = False):
             from .voice_controller import VoiceController
             voice_controller = VoiceController(config, tts_stop_callback=engine.stop)
             voice_controller.start()
-            print("[daemon] Voice controller started.", flush=True)
+            logger.info("Voice controller started.")
         except Exception as e:
-            print(f"[daemon] Voice controller failed to start: {e}", flush=True)
+            logger.error("Voice controller failed to start: %s", e)
 
     try:
         asyncio.run(run_loop(config, engine, voice_controller))

@@ -3,13 +3,16 @@ Queue manager — file-based FIFO queue for TTS messages.
 Producer (hook script) writes text files. Consumer (daemon) reads and speaks them.
 """
 
+from __future__ import annotations
+
+import contextlib
 import time
 from pathlib import Path
 
 from .config import QUEUE_DIR
 
 
-def ensure_queue_dir():
+def ensure_queue_dir() -> None:
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -26,7 +29,7 @@ def enqueue(text: str) -> Path:
 def enqueue_chunks(chunks: list[str]) -> list[Path]:
     """Write multiple chunks as sequential queue files."""
     ensure_queue_dir()
-    paths = []
+    paths: list[Path] = []
     base_time = time.time()
     for i, chunk in enumerate(chunks):
         if not chunk.strip():
@@ -59,13 +62,11 @@ def dequeue() -> tuple[Path, str] | None:
         return None
 
 
-def clear():
+def clear() -> None:
     """Remove all queued files."""
     for f in peek():
-        try:
+        with contextlib.suppress(OSError):
             f.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def depth() -> int:

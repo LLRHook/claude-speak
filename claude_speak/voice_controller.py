@@ -25,7 +25,64 @@ logger = logging.getLogger(__name__)
 
 
 class VoiceController:
-    """Orchestrates wake word -> voice input -> auto-submit pipeline."""
+    """Orchestrates wake word -> voice input -> auto-submit pipeline.
+
+    Thread safety
+    -------------
+    This class is used from multiple threads:
+
+      - **Main thread** (daemon): calls start(), stop(), reads is_running.
+      - **wakeword-listener thread**: invokes _on_wake_word callback.
+      - **voice-input-cycle thread**: spawned by _on_wake_word; calls
+        _handle_wake, which acquires _input_lock.
+
+    Shared mutable state and synchronisation:
+
+      _running (bool)
+          Written by: main thread (start, stop).
+          Read by:    voice-input-cycle thread (_on_wake_word, _handle_wake).
+          Protection: plain bool; single-writer pattern.  Reads from other
+                      threads see a stale value at worst, causing one extra
+                      cycle or a harmless skip.  Acceptable for a shutdown
+                      flag.
+
+      _voice_input_active (bool)
+          Written by: voice-input-cycle thread (_handle_wake, finally block).
+          Read by:    main thread (is_voice_input_active property).
+          Protection: plain bool; racy but intentionally so — used only for
+                      status reporting, never for control flow decisions.
+
+      _input_lock (threading.Lock)
+          Guards the voice input cycle to prevent double-triggering.
+          Acquired non-blocking by _handle_wake; if held, the second caller
+          exits immediately.
+
+      _wakeword_listener (WakeWordListener | None)
+          Written by: main thread (start, stop).
+          Read by:    voice-input-cycle thread (_handle_wake finally block,
+                      _on_wake_word).
+          Protection: main thread writes None in stop() only after the
+                      voice input cycle has finished (daemon serialises
+                      shutdown).  The voice-input-cycle thread checks for
+                      None before calling methods.
+
+      _tts_stop_callback (callable | None)
+          Written by: main thread (constructor only).
+          Read by:    voice-input-cycle thread (handle_stop, _on_wake_word).
+          Protection: effectively immutable after __init__; safe without locks.
+
+    Sentinel files (MUTE_FILE, PLAYING_FILE)
+    -----------------------------------------
+    File-based signalling between the daemon main loop and the voice
+    controller.  On POSIX, create (touch) and unlink are atomic at the
+    filesystem level, so concurrent access from multiple threads or
+    processes will not corrupt data.  However, the existence check
+    followed by create/unlink is *not* atomic, meaning a TOCTOU race is
+    theoretically possible.  In practice this only causes a harmless
+    double-mute or missed toggle, which self-corrects on the next wake
+    word.  All sentinel file operations are wrapped in try/except OSError
+    to guard against permission errors and filesystem edge cases.
+    """
 
     def __init__(
         self,
@@ -83,11 +140,16 @@ class VoiceController:
     # ------------------------------------------------------------------
 
     def handle_stop(self, phrase: str = "") -> None:
-        """Handle a stop command — clear queue and stop playback."""
+        """Handle a stop command -- clear queue and stop playback."""
         logger.info("Stop command received: '%s'", phrase)
         Q.clear()
-        # Clean up mute state to prevent deadlock
-        MUTE_FILE.unlink(missing_ok=True)
+        # Clean up mute state to prevent deadlock.
+        # POSIX: unlink is atomic; missing_ok handles the race where
+        # another thread already removed the file.
+        try:
+            MUTE_FILE.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("Failed to remove mute sentinel: %s", e)
 
         if self._tts_stop_callback is not None:
             try:
@@ -120,16 +182,29 @@ class VoiceController:
         if not self._running:
             return
 
-        # If TTS is currently playing, toggle mute
-        if PLAYING_FILE.exists():
-            if MUTE_FILE.exists():
-                MUTE_FILE.unlink(missing_ok=True)
-                logger.info("TTS unmuted (resume)")
-            else:
-                MUTE_FILE.touch()
-                if self._tts_stop_callback is not None:
-                    self._tts_stop_callback()
-                logger.info("TTS muted (paused)")
+        # If TTS is currently playing, toggle mute.
+        # Sentinel file checks: POSIX guarantees that exists(), touch(),
+        # and unlink() each execute atomically at the syscall level.
+        # The exists()-then-act pattern has a benign TOCTOU race — at
+        # worst we double-toggle, which self-corrects on the next wake.
+        try:
+            tts_playing = PLAYING_FILE.exists()
+        except OSError as e:
+            logger.warning("Failed to check playing sentinel: %s", e)
+            tts_playing = False
+
+        if tts_playing:
+            try:
+                if MUTE_FILE.exists():
+                    MUTE_FILE.unlink(missing_ok=True)
+                    logger.info("TTS unmuted (resume)")
+                else:
+                    MUTE_FILE.touch()
+                    if self._tts_stop_callback is not None:
+                        self._tts_stop_callback()
+                    logger.info("TTS muted (paused)")
+            except OSError as e:
+                logger.warning("Failed to toggle mute sentinel: %s", e)
             return
 
         # TTS is idle → start voice input

@@ -4,7 +4,8 @@ Uses a persistent output stream for gapless playback between chunks.
 Pre-generates upcoming chunks to eliminate dead air between sentences.
 """
 
-import os
+import logging
+import sys
 import threading
 import time
 import numpy as np
@@ -12,9 +13,35 @@ from pathlib import Path
 
 from .config import Config
 
-PERF_LOG = os.environ.get("CLAUDE_SPEAK_PERF", "").lower() in ("1", "true", "yes")
+logger = logging.getLogger(__name__)
+
+try:
+    import sounddevice as sd
+except ImportError:
+    logger.critical(
+        "sounddevice is not installed. "
+        "Install it with: pip install sounddevice "
+        "(PortAudio must also be installed: brew install portaudio)"
+    )
+    sys.exit(1)
 
 _DEVICE_RESOLVE_INTERVAL = 30  # seconds between audio device re-checks
+
+
+def _get_onnx_providers() -> list[str]:
+    """Return ONNX Runtime execution providers, preferring CoreML on Apple Silicon."""
+    import platform
+    providers = []
+    if platform.machine() == "arm64" and platform.system() == "Darwin":
+        try:
+            import onnxruntime
+            available = onnxruntime.get_available_providers()
+            if "CoreMLExecutionProvider" in available:
+                providers.append("CoreMLExecutionProvider")
+        except ImportError:
+            pass
+    providers.append("CPUExecutionProvider")
+    return providers
 
 
 class TTSEngine:
@@ -32,22 +59,52 @@ class TTSEngine:
         self._voice_style = None  # resolved in load() — string or numpy blend array
 
     def load(self):
-        """Load model, resolve voice (with optional blending), and audio device."""
+        """Load model, resolve voice (with optional blending), and audio device.
+
+        If model files are missing, auto-downloads them via ensure_models().
+        On download failure, logs actionable manual-download instructions and re-raises.
+        """
         from kokoro_onnx import Kokoro
 
         model_path = self.config.tts.model_path
         voices_path = self.config.tts.voices_path
 
-        print(f"[tts] Loading model from {Path(model_path).name}...", flush=True)
+        # Auto-download models if either file is missing
+        if not Path(model_path).exists() or not Path(voices_path).exists():
+            logger.info("Models not found locally, downloading...")
+            try:
+                from .models import ensure_models, MODELS_DIR
+                paths = ensure_models()
+                # Point config paths at the freshly downloaded files
+                self.config.tts.model_path = str(paths["kokoro-v1.0.onnx"])
+                self.config.tts.voices_path = str(paths["voices-v1.0.bin"])
+                model_path = self.config.tts.model_path
+                voices_path = self.config.tts.voices_path
+            except Exception as exc:
+                logger.critical(
+                    "Model download failed: %s\n"
+                    "       Download manually with:\n"
+                    "         curl -L -o %s/kokoro-v1.0.onnx "
+                    "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/kokoro-v1.0.onnx\n"
+                    "         curl -L -o %s/voices-v1.0.bin "
+                    "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/voices-v1.0.bin\n"
+                    "       Or run: claude-speak setup",
+                    exc, MODELS_DIR, MODELS_DIR,
+                )
+                raise
+
+        providers = _get_onnx_providers()
+        logger.info("ONNX providers: %s", providers)
+        logger.info("Loading model from %s...", Path(model_path).name)
+        # kokoro-onnx's Kokoro constructor does not expose a `providers` parameter,
+        # so provider selection is logged for diagnostics but cannot be passed directly.
         self.kokoro = Kokoro(model_path, voices_path)
         self._voice_style = self._resolve_voice()
         self._resolve_device()
-        print(
-            f"[tts] Ready. Voice: {self.config.tts.voice}, "
-            f"Lang: {self.config.tts.lang}, "
-            f"Speed: {self.config.tts.speed}, "
-            f"Device: {self._device_name()}",
-            flush=True,
+        logger.info(
+            "Ready. Voice: %s, Lang: %s, Speed: %s, Device: %s",
+            self.config.tts.voice, self.config.tts.lang,
+            self.config.tts.speed, self._device_name(),
         )
 
     def _resolve_voice(self):
@@ -87,13 +144,11 @@ class TTSEngine:
                 blend = np.add(blend, style * weight)
 
         names = " + ".join(f"{n} ({w*100:.0f}%)" for n, w in parts)
-        print(f"[tts] Voice blend: {names}", flush=True)
+        logger.info("Voice blend: %s", names)
         return blend
 
     def _resolve_device(self):
         """Pick the output audio device."""
-        import sounddevice as sd
-
         device_pref = self.config.tts.device
 
         if device_pref and device_pref != "auto":
@@ -110,7 +165,6 @@ class TTSEngine:
         self._output_device = sd.default.device[1]
 
     def _device_name(self) -> str:
-        import sounddevice as sd
         try:
             info = sd.query_devices(self._output_device)
             return info["name"]
@@ -118,9 +172,11 @@ class TTSEngine:
             return f"device {self._output_device}"
 
     def _ensure_stream(self, sample_rate: int):
-        """Create or reuse a persistent output stream for gapless playback."""
-        import sounddevice as sd
+        """Create or reuse a persistent output stream for gapless playback.
 
+        Retries up to 3 times with exponential backoff on PortAudio errors.
+        Falls back to the default output device if the configured device fails.
+        """
         with self._stream_lock:
             # Reuse if device and sample rate haven't changed
             if (self._stream is not None
@@ -138,14 +194,40 @@ class TTSEngine:
 
             self._stopped.clear()
             self._sample_rate = sample_rate
-            self._stream = sd.OutputStream(
-                samplerate=sample_rate,
-                channels=1,
-                dtype="float32",
-                device=self._output_device,
-                blocksize=0,  # let sounddevice pick optimal size
-            )
-            self._stream.start()
+
+            # Retry with exponential backoff on PortAudio errors
+            delays = [0.1, 0.5, 1.0]
+            last_err = None
+            for attempt in range(len(delays) + 1):
+                device = self._output_device
+                # On final retry, fall back to default device
+                if attempt == len(delays) and device != sd.default.device[1]:
+                    device = sd.default.device[1]
+                    logger.warning("Falling back to default output device")
+                try:
+                    self._stream = sd.OutputStream(
+                        samplerate=sample_rate,
+                        channels=1,
+                        dtype="float32",
+                        device=device,
+                        blocksize=0,  # let sounddevice pick optimal size
+                    )
+                    self._stream.start()
+                    return
+                except sd.PortAudioError as e:
+                    last_err = e
+                    if attempt < len(delays):
+                        logger.warning(
+                            "PortAudio error (attempt %d/3): %s", attempt + 1, e,
+                        )
+                        time.sleep(delays[attempt])
+                    else:
+                        # All retries exhausted (including default device fallback)
+                        logger.error(
+                            "PortAudio error: stream creation failed after "
+                            "3 retries + default device fallback: %s", last_err,
+                        )
+                        self._stream = None
 
     def _write_samples(self, samples: np.ndarray):
         """Write audio samples to the persistent stream.
@@ -228,8 +310,7 @@ class TTSEngine:
         first = True
         async for samples, sample_rate in stream:
             if first:
-                if PERF_LOG:
-                    print(f"[perf] tts first-segment: {(time.monotonic() - t0)*1000:.0f}ms", flush=True)
+                logger.debug("tts first-segment: %.0fms", (time.monotonic() - t0) * 1000)
                 first = False
             self._ensure_stream(sample_rate)
             self._write_samples(samples)

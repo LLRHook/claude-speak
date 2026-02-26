@@ -3,7 +3,11 @@ Audio chimes — short programmatic tones for state-change feedback.
 Uses numpy sine waves + sounddevice, no external audio files needed.
 """
 
+import logging
+
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 def _generate_tone(freq: float, duration: float, sample_rate: int = 24000) -> np.ndarray:
@@ -22,13 +26,20 @@ def _generate_tone(freq: float, duration: float, sample_rate: int = 24000) -> np
 
 def _play(samples: np.ndarray, volume: float, device: int | None, sample_rate: int = 24000):
     """Play samples on the given device. Non-blocking fire-and-forget."""
-    import sounddevice as sd
+    try:
+        import sounddevice as sd
+    except ImportError:
+        logger.warning(
+            "sounddevice is not installed — chimes disabled. "
+            "Install it with: pip install sounddevice"
+        )
+        return
 
     samples = (samples * volume).astype(np.float32)
     try:
         sd.play(samples, samplerate=sample_rate, device=device, blocking=True)
     except Exception as e:
-        print(f"[chimes] Playback error: {e}", flush=True)
+        logger.warning("Playback error: %s", e)
 
 
 def play_ready_chime(device: int | None = None, volume: float = 0.3):
@@ -60,7 +71,17 @@ def play_stop_chime(device: int | None = None, volume: float = 0.3):
 
 def play_ack_chime(device: int | None = None, volume: float = 0.3):
     """Spoken 'Got it' — voice input received, processing."""
-    import soundfile as sf
+    try:
+        import soundfile as sf
+    except ImportError:
+        logger.warning(
+            "soundfile is not installed — ack chime falling back to tone. "
+            "Install it with: pip install soundfile"
+        )
+        sr = 24000
+        samples = _generate_tone(783.99, 0.08, sr)
+        _play(samples, volume, device, sr)
+        return
     from pathlib import Path
     ack_path = Path(__file__).resolve().parent / "assets" / "ack.wav"
     if not ack_path.exists():

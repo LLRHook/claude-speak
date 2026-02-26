@@ -3,6 +3,8 @@ Text normalization pipeline for natural speech output.
 Transforms Claude's markdown/technical text into speech-friendly prose.
 """
 
+from __future__ import annotations
+
 import re
 
 # ---------------------------------------------------------------------------
@@ -245,7 +247,7 @@ _RE_VERSION_BARE = re.compile(
 )
 
 # clean_technical_punctuation
-_RE_EM_DASH = re.compile(r"\s*[—–]\s*")
+_RE_EM_DASH = re.compile(r"\s*[\u2014\u2013]\s*")  # em dash + en dash
 _RE_CURLY = re.compile(r"[{}]")
 _RE_SQUARE = re.compile(r"[\[\]]")
 _RE_EMPTY_PARENS = re.compile(r"\(\s*\)")
@@ -360,7 +362,7 @@ def describe_code_blocks(text: str) -> str:
         '```\\nsome code\\n```'
             → 'Here is a code block.'
     """
-    def _describe(m):
+    def _describe(m: re.Match[str]) -> str:
         lang_tag = (m.group(1) or "").strip().lower()
         body = m.group(2).strip()
         lang_name = LANG_NAMES.get(lang_tag)
@@ -372,7 +374,7 @@ def describe_code_blocks(text: str) -> str:
         # For untagged blocks, peek at the body: if it's a single short
         # line that starts with a common command, call it a command.
         if not lang_tag and body:
-            lines = [l for l in body.split("\n") if l.strip()]
+            lines = [line for line in body.split("\n") if line.strip()]
             if len(lines) <= 2:
                 is_command = True
 
@@ -396,7 +398,7 @@ def narrate_tables(text: str) -> str:
     Large tables (more than 5 data rows) are summarized instead of
     reading every row.
     """
-    def _oxford_join(items):
+    def _oxford_join(items: list[str]) -> str:
         """Join items with commas and 'and' before the last item."""
         if len(items) == 0:
             return ""
@@ -406,12 +408,12 @@ def narrate_tables(text: str) -> str:
             return f"{items[0]} and {items[1]}"
         return ", ".join(items[:-1]) + ", and " + items[-1]
 
-    def _parse_row(line):
+    def _parse_row(line: str) -> list[str]:
         """Extract cell values from a markdown table row."""
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         return [c for c in cells if c]
 
-    def _is_separator(line):
+    def _is_separator(line: str) -> bool:
         """Check if a line is a table separator (|---|---|)."""
         stripped = line.strip().strip("|")
         return bool(stripped) and all(
@@ -587,27 +589,27 @@ def clean_urls_and_emails(text: str) -> str:
     # Python docs URLs
     text = _RE_PYTHON_DOCS_URL.sub("a python docs link", text)
     # Localhost URLs
-    def _localhost(m):
+    def _localhost(m: re.Match[str]) -> str:
         port = m.group(1)
         if port:
             return f"localhost {port}"
         return "localhost"
     text = _RE_LOCALHOST_URL.sub(_localhost, text)
     # Generic URLs
-    def _generic_url(m):
+    def _generic_url(m: re.Match[str]) -> str:
         domain = m.group(1)
         spoken_domain = domain.replace(".", " dot ")
         return f"a link to {spoken_domain}"
     text = _RE_GENERIC_URL.sub(_generic_url, text)
     # Emails
-    def _email(m):
+    def _email(m: re.Match[str]) -> str:
         user = m.group(1)
         domain = m.group(2)
         spoken_domain = domain.replace(".", " dot ")
         return f"{user} at {spoken_domain}"
     text = _RE_EMAIL.sub(_email, text)
     # Bare domains (only when clearly a domain with known TLD)
-    def _bare_domain(m):
+    def _bare_domain(m: re.Match[str]) -> str:
         domain = m.group(1)
         return domain.replace(".", " dot ")
     text = _RE_BARE_DOMAIN.sub(_bare_domain, text)
@@ -625,7 +627,7 @@ def expand_currency(text: str) -> str:
         '$1.5M' → '1.5 million dollars'
     """
     # Handle magnitude suffixes first: $1.5M, $2B, etc.
-    def _currency_mag(m):
+    def _currency_mag(m: re.Match[str]) -> str:
         sym = m.group(1)
         amount = m.group(2)
         mag = m.group(3).upper()
@@ -644,7 +646,7 @@ def expand_currency(text: str) -> str:
     text = _RE_CURRENCY_MAG.sub(_currency_mag, text)
 
     # Handle cents: $99.99
-    def _currency_cents(m):
+    def _currency_cents(m: re.Match[str]) -> str:
         sym = m.group(1)
         whole = m.group(2)
         cents = m.group(3)
@@ -666,7 +668,7 @@ def expand_currency(text: str) -> str:
     text = _RE_CURRENCY_CENTS.sub(_currency_cents, text)
 
     # Handle plain amounts: $100, €50, etc.
-    def _currency_plain(m):
+    def _currency_plain(m: re.Match[str]) -> str:
         sym = m.group(1)
         amount = m.group(2)
         base = CURRENCY_MAP.get(sym, "dollar")
@@ -705,7 +707,7 @@ def expand_ordinals(text: str) -> str:
         '3rd' → 'third'
         '21st' → 'twenty first'
     """
-    def _replace_ordinal(m):
+    def _replace_ordinal(m: re.Match[str]) -> str:
         num = int(m.group(1))
         if num < 1 or num > 99:
             return m.group(0)
@@ -720,7 +722,7 @@ def strip_number_commas(text: str) -> str:
         '1,234' → '1234'
         '1,234,567' → '1234567'
     """
-    def _strip(m):
+    def _strip(m: re.Match[str]) -> str:
         return m.group(1) + m.group(2).replace(",", "")
     return _RE_NUMBER_COMMAS.sub(_strip, text)
 
@@ -734,7 +736,7 @@ def expand_fractions_ratios(text: str) -> str:
         '2/3' → 'two thirds'
         '16:9' → '16 to 9'
     """
-    def _replace_fraction(m):
+    def _replace_fraction(m: re.Match[str]) -> str:
         num = int(m.group(1))
         den = int(m.group(2))
         # Only handle small fractions we have words for
@@ -774,7 +776,7 @@ def expand_time_formats(text: str) -> str:
         '3:15pm' → '3:15 PM'
     """
     # First, normalize existing am/pm labels to uppercase
-    def _normalize_ampm(m):
+    def _normalize_ampm(m: re.Match[str]) -> str:
         h = m.group(1)
         mins = m.group(2)
         ampm = m.group(3).upper()
@@ -782,7 +784,7 @@ def expand_time_formats(text: str) -> str:
     text = _RE_TIME_AMPM.sub(_normalize_ampm, text)
 
     # Convert 24-hour times (only those NOT already followed by AM/PM)
-    def _convert_24h(m):
+    def _convert_24h(m: re.Match[str]) -> str:
         # Skip if followed by AM/PM (already handled)
         hour = int(m.group(1))
         minute = int(m.group(2))
@@ -856,7 +858,7 @@ def expand_dates(text: str) -> str:
         '2024-02-26' → 'February 26, 2024'
         '2024-01-01' → 'January 1, 2024'
     """
-    def _replace_date(m):
+    def _replace_date(m: re.Match[str]) -> str:
         year = m.group(1)
         month = int(m.group(2))
         day = int(m.group(3))
@@ -873,7 +875,7 @@ def expand_temperature(text: str) -> str:
         '22°C' → '22 degrees Celsius'
         '-40°F' → 'negative 40 degrees Fahrenheit'
     """
-    def _replace_temp(m):
+    def _replace_temp(m: re.Match[str]) -> str:
         num = m.group(1)
         scale = m.group(2).upper()
         scale_word = "Fahrenheit" if scale == "F" else "Celsius"
@@ -927,7 +929,7 @@ def expand_slash_pairs(text: str) -> str:
 
     # Generic word/word — only if both sides are purely alphabetic
     # and it doesn't look like a file path (no leading / or . nearby)
-    def _replace_slash_pair(m):
+    def _replace_slash_pair(m: re.Match[str]) -> str:
         full = m.group(0)
         left = m.group(1)
         right = m.group(2)
@@ -971,7 +973,7 @@ def expand_stop_words(text: str) -> str:
 
 def expand_units(text: str) -> str:
     """Expand '27MB' → '27 megabytes'."""
-    def _replace(m):
+    def _replace(m: re.Match[str]) -> str:
         number, unit_key = m.group(1), m.group(2)
         unit = UNIT_MAP.get(unit_key, unit_key)
         if number == "1" and unit.endswith("s"):
@@ -993,7 +995,7 @@ def clean_file_paths(text: str) -> str:
     # Replace src/ with source/ for speech
     text = _RE_SRC_PREFIX.sub("source ", text)
 
-    def _shorten(m):
+    def _shorten(m: re.Match[str]) -> str:
         return m.group(0).rstrip("/").rsplit("/", 1)[-1]
 
     text = _RE_LONG_PATH.sub(_shorten, text)
@@ -1019,7 +1021,7 @@ def speak_decimal_numbers(text: str) -> str:
         "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine",
     }
 
-    def _replace_decimal(m):
+    def _replace_decimal(m: re.Match[str]) -> str:
         whole = m.group(1)
         frac = m.group(2)
         suffix = m.group(3) or ""
@@ -1041,7 +1043,7 @@ def clean_version_strings(text: str) -> str:
     v1.0.0 → 'version 1 point 0 point 0'
     V2.5 → 'version 2 point 5'
     """
-    def _speak_version(m):
+    def _speak_version(m: re.Match[str]) -> str:
         prefix = m.group(1) or ""  # "version " if already present
         parts = m.group(2).split(".")
         spoken = " point ".join(parts)
@@ -1110,16 +1112,16 @@ def final_cleanup(text: str) -> str:
     text = _RE_MULTI_SPACE.sub(" ", text)
     text = _RE_MULTI_NEWLINE.sub("\n\n", text)
     # Remove empty/punctuation-only lines
-    lines = [l for l in text.split("\n")
-             if l.strip() and not _RE_PUNCT_ONLY_LINE.match(l.strip())]
+    lines = [ln for ln in text.split("\n")
+             if ln.strip() and not _RE_PUNCT_ONLY_LINE.match(ln.strip())]
     # Add pause at line breaks: if a line doesn't end with sentence punctuation,
     # append a period so Kokoro pauses naturally between lines.
     for i in range(len(lines)):
         stripped = lines[i].rstrip()
-        if stripped and not stripped[-1] in ".!?;:":
+        if stripped and stripped[-1] not in ".!?;:":
             lines[i] = stripped + "."
-    # Join with spaces — periods handle the pauses now
-    return " ".join(l.strip() for l in lines if l.strip())
+    # Join with spaces -- periods handle the pauses now
+    return " ".join(ln.strip() for ln in lines if ln.strip())
 
 
 # ---------------------------------------------------------------------------
