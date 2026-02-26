@@ -3,7 +3,9 @@
 # Blocks the prompt (exit 2) so Claude doesn't waste tokens processing it.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do SOURCE="$(readlink "$SOURCE")"; done
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 PROJECT="$(dirname "$SCRIPT_DIR")"
 
 # Read the prompt from stdin JSON
@@ -14,7 +16,7 @@ PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 # Case-insensitive. Only triggers on short, standalone requests.
 if echo "$PROMPT" | grep -iqE '^\s*(restart\s+(the\s+)?d[ae]+mon|d[ae]+mon\s+restart)\s*[.!?]*\s*$'; then
   # Run restart
-  python3 "$PROJECT/cli.py" restart 2>/dev/null &
+  PYTHONPATH="$PROJECT" python3 -m claude_speak.cli restart 2>/dev/null &
   sleep 2
 
   # Block the prompt and provide feedback via stderr
