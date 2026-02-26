@@ -18,6 +18,22 @@ from .tts_base import TTSBackend
 
 logger = logging.getLogger(__name__)
 
+
+def _mask_api_key(key: str) -> str:
+    """Mask an API key for safe logging, showing only the last 4 characters."""
+    if not key or len(key) <= 4:
+        return "****"
+    return "*" * (len(key) - 4) + key[-4:]
+
+
+def _sanitize_exception(exc: Exception, api_key: str) -> str:
+    """Return a string representation of *exc* with the API key redacted."""
+    msg = str(exc)
+    if api_key and api_key in msg:
+        msg = msg.replace(api_key, _mask_api_key(api_key))
+    return msg
+
+
 # PCM format at 24 kHz — raw signed 16-bit little-endian samples.
 # This avoids MP3 decoding overhead and gives us clean numpy conversion.
 _OUTPUT_FORMAT = "pcm_24000"
@@ -116,7 +132,7 @@ class ElevenLabsBackend(TTSBackend):
 
         self._client = ElevenLabs(api_key=self._api_key)
         self._async_client = AsyncElevenLabs(api_key=self._api_key)
-        logger.info("ElevenLabs client initialized")
+        logger.info("ElevenLabs client initialized (key=%s)", _mask_api_key(self._api_key))
 
     async def generate(
         self,
@@ -179,7 +195,7 @@ class ElevenLabsBackend(TTSBackend):
                 yield (samples, _SAMPLE_RATE)
 
         except Exception as exc:
-            logger.warning("ElevenLabs API error: %s", exc)
+            logger.warning("ElevenLabs API error: %s", _sanitize_exception(exc, self._api_key))
             raise
 
     def list_voices(self) -> list[str]:
@@ -201,7 +217,7 @@ class ElevenLabsBackend(TTSBackend):
             ]
             return list(self._voices_cache)
         except Exception as exc:
-            logger.warning("Failed to fetch ElevenLabs voices: %s", exc)
+            logger.warning("Failed to fetch ElevenLabs voices: %s", _sanitize_exception(exc, self._api_key))
             raise
 
     def is_loaded(self) -> bool:
