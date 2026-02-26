@@ -1,18 +1,23 @@
 """
-TTS engine — Kokoro model management, streaming audio, device routing.
-Uses a persistent output stream for gapless playback between chunks.
-Pre-generates upcoming chunks to eliminate dead air between sentences.
+TTS engine — backend-agnostic audio synthesis with streaming playback.
+
+TTSEngine handles audio device routing, stream management, and gapless playback.
+Actual speech synthesis is delegated to a TTSBackend (default: KokoroBackend).
 """
 
 import logging
 import sys
 import threading
 import time
-import numpy as np
 from pathlib import Path
+from typing import AsyncIterator
+
+import numpy as np
 
 from .audio_devices import get_device_manager
 from .config import Config
+from .ssml import SpeechSegment, generate_silence, parse_ssml
+from .tts_base import TTSBackend
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +30,11 @@ except ImportError:
         "(PortAudio must also be installed: brew install portaudio)"
     )
     sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Kokoro backend
+# ---------------------------------------------------------------------------
 
 def _get_onnx_providers() -> list[str]:
     """Return ONNX Runtime execution providers, preferring CoreML on Apple Silicon."""
@@ -42,21 +52,20 @@ def _get_onnx_providers() -> list[str]:
     return providers
 
 
-class TTSEngine:
-    """Loads Kokoro once, streams audio to the correct device with no gaps."""
+class KokoroBackend(TTSBackend):
+    """Kokoro-ONNX TTS backend.
+
+    Handles model loading, voice resolution (including blended voices),
+    and streaming audio generation via kokoro_onnx.
+    """
 
     def __init__(self, config: Config):
         self.config = config
-        self.kokoro = None
-        self._output_device = None
-        self._stream = None
-        self._sample_rate = None
-        self._stream_lock = threading.Lock()  # protects _stream creation/destruction
-        self._stopped = threading.Event()  # signals _write_samples to bail immediately
+        self._kokoro = None
         self._voice_style = None  # resolved in load() — string or numpy blend array
 
-    def load(self):
-        """Load model, resolve voice (with optional blending), and audio device.
+    def load(self) -> None:
+        """Load the Kokoro ONNX model and resolve voice style.
 
         If model files are missing, auto-downloads them via ensure_models().
         On download failure, logs actionable manual-download instructions and re-raises.
@@ -93,17 +102,57 @@ class TTSEngine:
         providers = _get_onnx_providers()
         logger.info("ONNX providers: %s", providers)
         logger.info("Loading model from %s...", Path(model_path).name)
-        # kokoro-onnx's Kokoro constructor does not expose a `providers` parameter,
-        # so provider selection is logged for diagnostics but cannot be passed directly.
-        self.kokoro = Kokoro(model_path, voices_path)
+        self._kokoro = Kokoro(model_path, voices_path)
         self._voice_style = self._resolve_voice()
-        dm = get_device_manager()
-        self._output_device = dm.resolve_output(self.config.tts.device)
-        logger.info(
-            "Ready. Voice: %s, Lang: %s, Speed: %s, Device: %s",
-            self.config.tts.voice, self.config.tts.lang,
-            self.config.tts.speed, dm.get_device_name(self._output_device),
+
+    async def generate(self, text: str, voice: str, speed: float = 1.0, lang: str = "en-us") -> AsyncIterator[tuple[np.ndarray, int]]:
+        """Generate audio segments from *text* using the Kokoro streaming API.
+
+        The *voice* parameter is accepted for interface compliance but the
+        backend uses its internally resolved ``_voice_style`` (which may be a
+        blended numpy array) so that voice blending works transparently.
+        """
+        stream = self._kokoro.create_stream(
+            text,
+            voice=self._voice_style,
+            speed=speed,
+            lang=lang,
         )
+        async for samples, sample_rate in stream:
+            yield samples, sample_rate
+
+    def list_voices(self) -> list[str]:
+        """Return available Kokoro voice names."""
+        return list(self._kokoro.get_voices())
+
+    def is_loaded(self) -> bool:
+        """Check if the Kokoro model is loaded and ready."""
+        return self._kokoro is not None
+
+    @property
+    def name(self) -> str:  # noqa: D401
+        """Human-readable engine name."""
+        return "kokoro"
+
+    # -- internal helpers ---------------------------------------------------
+
+    @property
+    def kokoro(self):
+        """Direct access to the underlying Kokoro instance (for legacy compat)."""
+        return self._kokoro
+
+    @kokoro.setter
+    def kokoro(self, value):
+        self._kokoro = value
+
+    @property
+    def voice_style(self):
+        """Resolved voice style (string or numpy blend array)."""
+        return self._voice_style
+
+    @voice_style.setter
+    def voice_style(self, value):
+        self._voice_style = value
 
     def _resolve_voice(self):
         """Parse voice config — single name or blend like 'bm_george:60+bm_fable:40'.
@@ -135,7 +184,7 @@ class TTSEngine:
             parts = [(n, w if w is not None else equal_share) for n, w in parts]
 
         for name, weight in parts:
-            style = self.kokoro.get_voice_style(name)
+            style = self._kokoro.get_voice_style(name)
             if blend is None:
                 blend = style * weight
             else:
@@ -144,6 +193,131 @@ class TTSEngine:
         names = " + ".join(f"{n} ({w*100:.0f}%)" for n, w in parts)
         logger.info("Voice blend: %s", names)
         return blend
+
+
+# ---------------------------------------------------------------------------
+# Backend factory
+# ---------------------------------------------------------------------------
+
+AVAILABLE_ENGINES = ["kokoro", "piper", "elevenlabs"]
+
+
+def create_backend(engine_name: str, config: Config) -> TTSBackend:
+    """Create a TTS backend by name.
+
+    Supported engines:
+      - "kokoro"     → KokoroBackend (built-in)
+      - "piper"      → PiperBackend  (from tts_piper module)
+      - "elevenlabs" → ElevenLabsBackend (from tts_elevenlabs module)
+
+    Raises ValueError for unknown engine names.
+    """
+    name = engine_name.lower().strip()
+    if name == "kokoro":
+        return KokoroBackend(config)
+    elif name == "piper":
+        try:
+            from .tts_piper import PiperBackend
+        except ImportError as exc:
+            raise ImportError(
+                "Piper backend requires the tts_piper module. "
+                "Ensure claude_speak/tts_piper.py is installed."
+            ) from exc
+        return PiperBackend(config)
+    elif name == "elevenlabs":
+        try:
+            from .tts_elevenlabs import ElevenLabsBackend
+        except ImportError as exc:
+            raise ImportError(
+                "ElevenLabs backend requires the tts_elevenlabs module. "
+                "Ensure claude_speak/tts_elevenlabs.py is installed."
+            ) from exc
+        return ElevenLabsBackend(config)
+    else:
+        raise ValueError(
+            f"Unknown TTS engine: {engine_name!r}. "
+            f"Available engines: {', '.join(AVAILABLE_ENGINES)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TTSEngine — playback & device management (backend-agnostic)
+# ---------------------------------------------------------------------------
+
+class TTSEngine:
+    """Loads a TTS backend, streams audio to the correct device with no gaps."""
+
+    def __init__(self, config: Config, backend: TTSBackend | None = None):
+        self.config = config
+        self._backend = backend if backend is not None else KokoroBackend(config)
+        self._output_device = None
+        self._stream = None
+        self._sample_rate = None
+        self._stream_lock = threading.Lock()  # protects _stream creation/destruction
+        self._stopped = threading.Event()  # signals _write_samples to bail immediately
+
+    # -- Legacy compatibility properties ------------------------------------
+    # Existing tests and code reference engine.kokoro directly. These
+    # properties proxy through to the KokoroBackend when applicable.
+
+    @property
+    def kokoro(self):
+        """Legacy access to the underlying Kokoro model instance."""
+        if isinstance(self._backend, KokoroBackend):
+            return self._backend.kokoro
+        return None
+
+    @kokoro.setter
+    def kokoro(self, value):
+        if isinstance(self._backend, KokoroBackend):
+            self._backend.kokoro = value
+
+    @property
+    def _voice_style(self):
+        """Legacy access to resolved voice style."""
+        if isinstance(self._backend, KokoroBackend):
+            return self._backend.voice_style
+        return None
+
+    @_voice_style.setter
+    def _voice_style(self, value):
+        if isinstance(self._backend, KokoroBackend):
+            self._backend.voice_style = value
+
+    # -- Public API ---------------------------------------------------------
+
+    def load(self):
+        """Load the TTS backend and resolve audio device."""
+        self._backend.load()
+        dm = get_device_manager()
+        self._output_device = dm.resolve_output(self.config.tts.device)
+        logger.info(
+            "Ready. Voice: %s, Lang: %s, Speed: %s, Device: %s",
+            self.config.tts.voice, self.config.tts.lang,
+            self.config.tts.speed, dm.get_device_name(self._output_device),
+        )
+
+    def swap_backend(self, backend: TTSBackend):
+        """Swap to a new TTS backend. Stops current playback first.
+
+        The old backend is replaced immediately. Current playback is stopped
+        and the audio stream is closed so the next speak() call starts fresh
+        with the new backend.
+        """
+        old_name = self._backend.name if self._backend else "none"
+        # Stop playback and close the audio stream
+        self.stop()
+        self._backend = backend
+        logger.info(
+            "Backend swapped: %s → %s",
+            old_name, backend.name,
+        )
+
+    def _resolve_voice(self):
+        """Delegate voice resolution to the backend (legacy compat)."""
+        if isinstance(self._backend, KokoroBackend):
+            return self._backend._resolve_voice()
+        return self.config.tts.voice
 
     def _ensure_stream(self, sample_rate: int):
         """Create or reuse a persistent output stream for gapless playback.
@@ -276,17 +450,16 @@ class TTSEngine:
 
     async def generate_audio(self, text: str) -> list[tuple[np.ndarray, int]]:
         """Generate audio samples without playing. Returns list of (samples, sample_rate)."""
-        if not self.kokoro:
+        if not self._backend.is_loaded():
             self.load()
 
         result = []
-        stream = self.kokoro.create_stream(
+        async for samples, sample_rate in self._backend.generate(
             text,
-            voice=self._voice_style,
+            voice=self.config.tts.voice,
             speed=self.config.tts.speed,
             lang=self.config.tts.lang,
-        )
-        async for samples, sample_rate in stream:
+        ):
             result.append((samples, sample_rate))
         return result
 
@@ -298,27 +471,56 @@ class TTSEngine:
             self._write_samples(samples)
 
     async def speak(self, text: str):
-        """Stream text through Kokoro and play audio seamlessly."""
-        if not self.kokoro:
+        """Stream text through the backend and play audio seamlessly.
+
+        If *text* contains SSML-like markup (``<pause>``, ``<slow>``, ``<fast>``,
+        ``<spell>``), it is parsed into :class:`SpeechSegment` objects and each
+        segment is synthesised with the appropriate speed modifier / silence.
+        Plain text without any tags is handled identically to the previous
+        behaviour (single pass through the backend).
+        """
+        if not self._backend.is_loaded():
             self.load()
 
         self._maybe_resolve_device()
 
-        t0 = time.monotonic()
-        stream = self.kokoro.create_stream(
-            text,
-            voice=self._voice_style,
-            speed=self.config.tts.speed,
-            lang=self.config.tts.lang,
-        )
+        segments = parse_ssml(text)
 
+        t0 = time.monotonic()
         first = True
-        async for samples, sample_rate in stream:
-            if first:
-                logger.debug("tts first-segment: %.0fms", (time.monotonic() - t0) * 1000)
-                first = False
-            self._ensure_stream(sample_rate)
-            self._write_samples(samples)
+
+        for seg in segments:
+            if self._stopped.is_set():
+                break
+
+            # Insert silence for pause segments.
+            if seg.pause_ms > 0:
+                sample_rate = self._sample_rate or 24000
+                silence = generate_silence(seg.pause_ms, sample_rate)
+                self._ensure_stream(sample_rate)
+                self._write_samples(silence)
+                # A pause-only segment has no text to synthesise.
+                if not seg.text:
+                    continue
+
+            # Nothing to synthesise for empty text (e.g. bare pause already handled).
+            if not seg.text:
+                continue
+
+            # Compute effective speed: base config speed * segment modifier.
+            effective_speed = self.config.tts.speed * seg.speed_modifier
+
+            async for samples, sample_rate in self._backend.generate(
+                seg.text,
+                voice=self.config.tts.voice,
+                speed=effective_speed,
+                lang=self.config.tts.lang,
+            ):
+                if first:
+                    logger.debug("tts first-segment: %.0fms", (time.monotonic() - t0) * 1000)
+                    first = False
+                self._ensure_stream(sample_rate)
+                self._write_samples(samples)
 
     def stop(self):
         """Stop playback immediately (thread-safe).
@@ -338,6 +540,6 @@ class TTSEngine:
                 self._stream = None
 
     def list_voices(self) -> list[str]:
-        if not self.kokoro:
+        if not self._backend.is_loaded():
             self.load()
-        return list(self.kokoro.get_voices())
+        return self._backend.list_voices()
