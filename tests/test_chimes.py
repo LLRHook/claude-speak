@@ -125,26 +125,15 @@ class TestChimeComposition:
         assert len(samples) == expected_len
 
     @patch("claude_speak.chimes._play")
-    def test_play_ack_chime_fallback_when_asset_missing(self, mock_play):
-        """When ack.wav doesn't exist, should fall back to a tone."""
-        # Temporarily rename the asset so it doesn't exist
-        ack_path = Path(__file__).resolve().parent.parent / "claude_speak" / "assets" / "ack.wav"
-        tmp_path = ack_path.with_suffix(".wav.bak")
-        renamed = False
-        try:
-            if ack_path.exists():
-                ack_path.rename(tmp_path)
-                renamed = True
-            play_ack_chime(device=None, volume=0.3)
-            mock_play.assert_called_once()
-            # Fallback tone should be ~0.08s at 24kHz
-            samples = mock_play.call_args[0][0]
-            sr = 24000
-            expected_len = int(sr * 0.08)
-            assert len(samples) == expected_len
-        finally:
-            if renamed:
-                tmp_path.rename(ack_path)
+    def test_play_ack_chime_is_two_note_chime(self, mock_play):
+        """Ack chime should be a two-note ascending chime (G5 -> B5)."""
+        play_ack_chime(device=None, volume=0.3)
+        mock_play.assert_called_once()
+        samples = mock_play.call_args[0][0]
+        sr = 24000
+        # Two notes (0.06s + 0.10s) + gap (0.02s) = 0.18s
+        expected_len = int(sr * 0.06) + int(sr * 0.02) + int(sr * 0.10)
+        assert len(samples) == expected_len
 
     @patch("claude_speak.chimes._play")
     def test_ready_chime_samples_longer_than_single_note(self, mock_play):

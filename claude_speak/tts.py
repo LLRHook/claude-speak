@@ -152,12 +152,23 @@ class TTSEngine:
         Falls back to the default output device if the configured device fails.
         """
         with self._stream_lock:
-            # Reuse if device and sample rate haven't changed
+            # Before reusing an existing stream, verify the output device is still available
             if (self._stream is not None
                     and self._stream.active
                     and self._sample_rate == sample_rate):
-                self._stopped.clear()
-                return
+                dm = get_device_manager()
+                if self._output_device is not None and not dm.is_device_available(self._output_device):
+                    logger.warning("Output device disconnected, falling back to default")
+                    try:
+                        self._stream.close()
+                    except Exception:
+                        pass
+                    self._stream = None
+                    dm.invalidate_cache()
+                    self._output_device = dm.get_default_output()
+                else:
+                    self._stopped.clear()
+                    return
 
             # Close old stream
             if self._stream is not None:
@@ -236,7 +247,12 @@ class TTSEngine:
             try:
                 stream.write(samples[offset:end])
             except sd.PortAudioError as e:
-                logger.warning("Audio device error during playback: %s", e)
+                logger.warning("Audio write failed, device may have disconnected: %s", e)
+                dm = get_device_manager()
+                if self._output_device is not None and not dm.is_device_available(self._output_device):
+                    # Device is gone — invalidate cache so next _ensure_stream re-resolves
+                    dm.invalidate_cache()
+                    self._output_device = None
                 with self._stream_lock:
                     if self._stream is stream:
                         try:
@@ -244,7 +260,6 @@ class TTSEngine:
                         except Exception:
                             pass
                         self._stream = None
-                self._output_device = get_device_manager().resolve_output(self.config.tts.device)
                 break
             except Exception:
                 # Stream was aborted by stop() — clean up

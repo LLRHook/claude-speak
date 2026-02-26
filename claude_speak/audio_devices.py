@@ -2,12 +2,72 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 _RESOLVE_INTERVAL = 30  # seconds between device re-checks
+
+
+class DeviceChangeMonitor:
+    """Polls for audio device changes and fires callbacks."""
+
+    def __init__(self, poll_interval: float = 2.0):
+        self._poll_interval = poll_interval
+        self._callbacks: list[Callable[[list[str], list[str]], None]] = []
+        self._thread: Optional[threading.Thread] = None
+        self._running = threading.Event()
+        self._last_devices: Optional[list[str]] = None
+
+    def on_change(self, callback: Callable[[list[str], list[str]], None]) -> None:
+        """Register a callback: fn(added_devices, removed_devices)."""
+        self._callbacks.append(callback)
+
+    def start(self) -> None:
+        """Start polling in background thread."""
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._running.set()
+        self._thread = threading.Thread(
+            target=self._poll_loop,
+            name="device-change-monitor",
+            daemon=True,
+        )
+        self._thread.start()
+        logger.debug("DeviceChangeMonitor started (poll_interval=%.1fs)", self._poll_interval)
+
+    def stop(self) -> None:
+        """Stop polling."""
+        self._running.clear()
+        if self._thread is not None:
+            self._thread.join(timeout=self._poll_interval + 1.0)
+            self._thread = None
+        logger.debug("DeviceChangeMonitor stopped.")
+
+    def _poll_loop(self) -> None:
+        """Poll sounddevice.query_devices() and detect changes."""
+        import sounddevice as sd
+        self._last_devices = [d["name"] for d in sd.query_devices()]
+        while self._running.is_set():
+            self._running.wait(timeout=self._poll_interval)
+            if not self._running.is_set():
+                break
+            try:
+                current = [d["name"] for d in sd.query_devices()]
+                if current != self._last_devices:
+                    added = [d for d in current if d not in self._last_devices]
+                    removed = [d for d in self._last_devices if d not in current]
+                    self._last_devices = current
+                    logger.info("Audio devices changed: +%s -%s", added, removed)
+                    for cb in self._callbacks:
+                        try:
+                            cb(added, removed)
+                        except Exception as e:
+                            logger.error("Device change callback error: %s", e)
+            except Exception as e:
+                logger.debug("Device poll error: %s", e)
 
 
 class AudioDeviceManager:
@@ -18,6 +78,7 @@ class AudioDeviceManager:
         self._input_device: Optional[int] = None
         self._builtin_mic_id: Optional[int] = None
         self._last_resolve_time: float = 0.0
+        self._monitor: Optional[DeviceChangeMonitor] = None
 
     def list_output_devices(self) -> list[dict]:
         """List all available output devices."""
@@ -110,6 +171,38 @@ class AudioDeviceManager:
             self._output_device = self.resolve_output(preference)
             self._last_resolve_time = now
         return self._output_device
+
+    def is_device_available(self, device_id: int) -> bool:
+        """Check if a device is still connected/available."""
+        import sounddevice as sd
+        try:
+            info = sd.query_devices(device_id)
+            return info is not None
+        except Exception:
+            return False
+
+    def start_monitoring(self, poll_interval: float = 2.0) -> None:
+        """Start background device-change monitoring.
+
+        When a device is added or removed, the cache is invalidated so the
+        next call to maybe_resolve_output() picks up the new default device
+        immediately instead of waiting up to _RESOLVE_INTERVAL seconds.
+        """
+        if self._monitor is None:
+            self._monitor = DeviceChangeMonitor(poll_interval=poll_interval)
+            self._monitor.on_change(lambda added, removed: self.invalidate_cache())
+        self._monitor.start()
+
+    def stop_monitoring(self) -> None:
+        """Stop background device-change monitoring."""
+        if self._monitor is not None:
+            self._monitor.stop()
+            self._monitor = None
+
+    def invalidate_cache(self):
+        """Force re-resolution of devices on next call."""
+        self._last_resolve_time = 0.0
+        self._output_device = None
 
 
 # Module-level singleton

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch, call
 import numpy as np
 import pytest
 
-from claude_speak.config import WakeWordConfig
+from claude_speak.config import AudioConfig, WakeWordConfig
 from claude_speak.audio_devices import AudioDeviceManager, get_device_manager
 from claude_speak.wakeword import WakeWordListener, _openwakeword_available, _sounddevice_available
 
@@ -291,3 +291,228 @@ class TestFindBuiltinMic:
         with patch.dict("sys.modules", {"sounddevice": mock_sd}):
             result = dm.find_builtin_mic()
             assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: Bluetooth mic workaround
+# ---------------------------------------------------------------------------
+
+def _make_listener_with_audio_config(bt_mic_workaround: bool = True, **ww_overrides):
+    """Create a WakeWordListener with explicit AudioConfig for BT tests."""
+    ww_defaults = dict(
+        enabled=True,
+        model="hey_jarvis",
+        stop_model="",
+        sensitivity=0.5,
+        stop_sensitivity=0.5,
+    )
+    ww_defaults.update(ww_overrides)
+    ww_config = WakeWordConfig(**ww_defaults)
+    audio_config = AudioConfig(bt_mic_workaround=bt_mic_workaround)
+    return WakeWordListener(ww_config, audio_config=audio_config)
+
+
+class TestBluetoothMicWorkaround:
+    """Tests for the bt_mic_workaround feature in WakeWordListener."""
+
+    def test_bt_always_builtin_false_by_default_before_loop_starts(self):
+        """_bt_always_builtin starts as False before _listen_loop runs."""
+        listener = _make_listener_with_audio_config(bt_mic_workaround=True)
+        assert listener._bt_always_builtin is False
+
+    def test_audio_config_stored_on_listener(self):
+        """AudioConfig is stored and accessible on the listener."""
+        audio_cfg = AudioConfig(bt_mic_workaround=False)
+        ww_cfg = WakeWordConfig(enabled=True)
+        listener = WakeWordListener(ww_cfg, audio_config=audio_cfg)
+        assert listener._audio_config.bt_mic_workaround is False
+
+    def test_default_audio_config_has_bt_workaround_enabled(self):
+        """When no AudioConfig is given, the workaround defaults to True."""
+        listener = WakeWordListener(WakeWordConfig())
+        assert listener._audio_config.bt_mic_workaround is True
+
+    @patch("claude_speak.wakeword.get_device_manager")
+    def test_bt_always_builtin_set_when_bt_output_detected(self, mock_get_dm):
+        """_listen_loop sets _bt_always_builtin when BT output is detected."""
+        mock_dm = MagicMock()
+        mock_dm.find_builtin_mic.return_value = 1
+        mock_dm.get_default_output.return_value = 0
+        mock_dm.is_bluetooth.return_value = True
+        mock_get_dm.return_value = mock_dm
+
+        listener = _make_listener_with_audio_config(bt_mic_workaround=True)
+        listener._running_event.set()  # will be cleared by _load_model failure — that's fine
+
+        # Stub _load_model to fail immediately so _listen_loop exits cleanly
+        listener._load_model = MagicMock(return_value=False)
+
+        listener._listen_loop()
+
+        # Even though load_model failed, the BT check happens first only if
+        # load_model succeeds. Let's patch it to succeed and confirm the flag.
+        listener._bt_always_builtin = False  # reset
+        listener._running_event.set()
+
+        # Now make load succeed and PortAudio fail immediately after BT check
+        import sounddevice as sd_real  # noqa: F401 — just for the type
+        mock_sd = MagicMock()
+        mock_sd.InputStream.return_value.__enter__ = MagicMock(side_effect=Exception("stop"))
+        mock_sd.InputStream.return_value.__exit__ = MagicMock(return_value=False)
+        mock_sd.PortAudioError = OSError
+
+        def fake_load_model(self_inner=listener):
+            self_inner._model = MagicMock()
+            self_inner._model.predict.return_value = {}
+            return True
+
+        listener._load_model = fake_load_model
+
+        with patch.dict("sys.modules", {"sounddevice": mock_sd, "numpy": MagicMock()}):
+            import numpy as np_mock  # noqa: F811
+            mock_sd.InputStream.return_value.__enter__.side_effect = None
+            mock_sd.InputStream.return_value.__enter__.return_value = MagicMock()
+
+            # Let the loop run briefly then stop it
+            import threading
+
+            def stop_soon():
+                time.sleep(0.05)
+                listener._running_event.clear()
+
+            stopper = threading.Thread(target=stop_soon, daemon=True)
+            stopper.start()
+            listener._listen_loop()
+
+        assert listener._bt_always_builtin is True
+
+    @patch("claude_speak.wakeword.get_device_manager")
+    def test_bt_always_builtin_not_set_when_non_bt_output(self, mock_get_dm):
+        """_listen_loop does NOT set _bt_always_builtin for non-BT output."""
+        mock_dm = MagicMock()
+        mock_dm.find_builtin_mic.return_value = 1
+        mock_dm.get_default_output.return_value = 2
+        mock_dm.is_bluetooth.return_value = False
+        mock_get_dm.return_value = mock_dm
+
+        listener = _make_listener_with_audio_config(bt_mic_workaround=True)
+
+        def fake_load_model(self_inner=listener):
+            self_inner._model = MagicMock()
+            return True
+
+        listener._load_model = fake_load_model
+
+        mock_sd = MagicMock()
+        mock_sd.PortAudioError = OSError
+        inner_stream = MagicMock()
+        # Make read() raise immediately so the loop exits without sleeping
+        inner_stream.read.side_effect = Exception("stop loop")
+        mock_sd.InputStream.return_value.__enter__ = MagicMock(return_value=inner_stream)
+        mock_sd.InputStream.return_value.__exit__ = MagicMock(return_value=False)
+
+        import threading
+
+        def stop_soon():
+            time.sleep(0.05)
+            listener._running_event.clear()
+
+        stopper = threading.Thread(target=stop_soon, daemon=True)
+        stopper.start()
+
+        with patch.dict("sys.modules", {"sounddevice": mock_sd, "numpy": MagicMock()}):
+            listener._listen_loop()
+
+        assert listener._bt_always_builtin is False
+
+    @patch("claude_speak.wakeword.get_device_manager")
+    def test_bt_always_builtin_not_set_when_workaround_disabled(self, mock_get_dm):
+        """When bt_mic_workaround=False, BT output does not set _bt_always_builtin."""
+        mock_dm = MagicMock()
+        mock_dm.find_builtin_mic.return_value = 1
+        mock_dm.get_default_output.return_value = 0
+        mock_dm.is_bluetooth.return_value = True  # BT output is present
+        mock_get_dm.return_value = mock_dm
+
+        # Workaround disabled
+        listener = _make_listener_with_audio_config(bt_mic_workaround=False)
+
+        def fake_load_model(self_inner=listener):
+            self_inner._model = MagicMock()
+            return True
+
+        listener._load_model = fake_load_model
+
+        mock_sd = MagicMock()
+        mock_sd.PortAudioError = OSError
+        inner_stream = MagicMock()
+        inner_stream.read.side_effect = Exception("stop loop")
+        mock_sd.InputStream.return_value.__enter__ = MagicMock(return_value=inner_stream)
+        mock_sd.InputStream.return_value.__exit__ = MagicMock(return_value=False)
+
+        import threading
+
+        def stop_soon():
+            time.sleep(0.05)
+            listener._running_event.clear()
+
+        stopper = threading.Thread(target=stop_soon, daemon=True)
+        stopper.start()
+
+        with patch.dict("sys.modules", {"sounddevice": mock_sd, "numpy": MagicMock()}):
+            listener._listen_loop()
+
+        assert listener._bt_always_builtin is False
+
+    @patch("claude_speak.wakeword.get_device_manager")
+    def test_bt_always_builtin_not_set_when_no_builtin_mic_found(self, mock_get_dm):
+        """When no built-in mic is found, BT workaround stays inactive."""
+        mock_dm = MagicMock()
+        mock_dm.find_builtin_mic.return_value = None  # no built-in mic
+        mock_dm.get_default_output.return_value = 0
+        mock_dm.is_bluetooth.return_value = True
+        mock_get_dm.return_value = mock_dm
+
+        listener = _make_listener_with_audio_config(bt_mic_workaround=True)
+
+        def fake_load_model(self_inner=listener):
+            self_inner._model = MagicMock()
+            return True
+
+        listener._load_model = fake_load_model
+
+        mock_sd = MagicMock()
+        mock_sd.PortAudioError = OSError
+        inner_stream = MagicMock()
+        inner_stream.read.side_effect = Exception("stop loop")
+        mock_sd.InputStream.return_value.__enter__ = MagicMock(return_value=inner_stream)
+        mock_sd.InputStream.return_value.__exit__ = MagicMock(return_value=False)
+
+        import threading
+
+        def stop_soon():
+            time.sleep(0.05)
+            listener._running_event.clear()
+
+        stopper = threading.Thread(target=stop_soon, daemon=True)
+        stopper.start()
+
+        with patch.dict("sys.modules", {"sounddevice": mock_sd, "numpy": MagicMock()}):
+            listener._listen_loop()
+
+        assert listener._bt_always_builtin is False
+
+    def test_use_builtin_mic_still_works_as_no_op_when_bt_always_builtin(self):
+        """use_builtin_mic() is safe to call even when bt_always_builtin is True."""
+        listener = _make_listener_with_audio_config(bt_mic_workaround=True)
+        listener._bt_always_builtin = True  # simulate post-startup BT detection
+        listener.use_builtin_mic()
+        assert listener._swap_mic_event.is_set() is True  # event is set, but listener ignores it
+
+    def test_use_default_mic_still_works_as_no_op_when_bt_always_builtin(self):
+        """use_default_mic() is safe to call even when bt_always_builtin is True."""
+        listener = _make_listener_with_audio_config(bt_mic_workaround=True)
+        listener._bt_always_builtin = True
+        listener._swap_mic_event.set()
+        listener.use_default_mic()
+        assert listener._swap_mic_event.is_set() is False  # event cleared, but builtin still used

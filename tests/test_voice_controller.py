@@ -289,3 +289,70 @@ class TestChooseVoiceInput:
         assert result is True
         mock_builtin.assert_called_once()
         mock_ack.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Tests: bt_workaround_active property
+# ---------------------------------------------------------------------------
+
+class TestBtWorkaroundActive:
+    """Tests for the bt_workaround_active property."""
+
+    def test_bt_workaround_active_false_when_no_listener(self):
+        """Returns False when no wakeword listener is set."""
+        vc = _make_controller(wakeword_enabled=False)
+        assert vc.bt_workaround_active is False
+
+    def test_bt_workaround_active_false_when_listener_not_bt(self):
+        """Returns False when the listener has _bt_always_builtin=False."""
+        vc = _make_controller()
+        mock_ww = MagicMock()
+        mock_ww._bt_always_builtin = False
+        vc._wakeword_listener = mock_ww
+        assert vc.bt_workaround_active is False
+
+    def test_bt_workaround_active_true_when_listener_bt(self):
+        """Returns True when the listener has _bt_always_builtin=True."""
+        vc = _make_controller()
+        mock_ww = MagicMock()
+        mock_ww._bt_always_builtin = True
+        vc._wakeword_listener = mock_ww
+        assert vc.bt_workaround_active is True
+
+    @patch("claude_speak.voice_controller.WakeWordListener")
+    def test_start_wakeword_passes_audio_config(self, mock_ww_cls):
+        """_start_wakeword passes the AudioConfig to WakeWordListener."""
+        mock_ww = MagicMock()
+        mock_ww.start.return_value = True
+        mock_ww._bt_always_builtin = False
+        mock_ww_cls.return_value = mock_ww
+
+        audio_cfg = AudioConfig(bt_mic_workaround=True)
+        config = Config(
+            wakeword=WakeWordConfig(enabled=True),
+            input=InputConfig(backend="builtin"),
+            audio=audio_cfg,
+        )
+        vc = VoiceController(config=config)
+        vc.start()
+
+        # Verify WakeWordListener was constructed with the audio_config kwarg
+        _, kwargs = mock_ww_cls.call_args
+        assert "audio_config" in kwargs
+        assert kwargs["audio_config"] is audio_cfg
+
+    @patch("claude_speak.voice_controller.WakeWordListener")
+    def test_start_wakeword_passes_wakeword_config_as_positional(self, mock_ww_cls):
+        """_start_wakeword passes the WakeWordConfig as the first positional arg."""
+        mock_ww = MagicMock()
+        mock_ww.start.return_value = True
+        mock_ww._bt_always_builtin = False
+        mock_ww_cls.return_value = mock_ww
+
+        ww_cfg = WakeWordConfig(enabled=True, sensitivity=0.7)
+        config = Config(wakeword=ww_cfg, audio=AudioConfig())
+        vc = VoiceController(config=config)
+        vc.start()
+
+        args, _ = mock_ww_cls.call_args
+        assert args[0] is ww_cfg

@@ -17,6 +17,7 @@ import sys
 import time
 from pathlib import Path
 
+from .audio_devices import get_device_manager
 from .config import Config, CONFIG_PATH, PID_FILE, TOGGLE_FILE, MUTE_FILE, PLAYING_FILE, LOG_FILE, QUEUE_DIR, load_config
 from .normalizer import normalize, chunk_text
 from .tts import TTSEngine
@@ -158,9 +159,12 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
 
             # Mark as playing so VoiceController knows TTS is active
             PLAYING_FILE.touch()
-            # Swap to built-in mic during TTS to avoid BT profile switching on AirPods
+            # Swap to built-in mic during TTS to avoid BT profile switching on AirPods.
+            # Skip when the BT workaround is already active: the listener is already on
+            # the built-in mic for the entire session, so no swap is needed.
             if voice_controller and voice_controller._wakeword_listener:
-                voice_controller._wakeword_listener.use_builtin_mic()
+                if not voice_controller.bt_workaround_active:
+                    voice_controller._wakeword_listener.use_builtin_mic()
 
             try:
                 if len(chunks) == 1:
@@ -205,9 +209,12 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
             finally:
                 PLAYING_FILE.unlink(missing_ok=True)
                 MUTE_FILE.unlink(missing_ok=True)  # prevent mute deadlock if TTS finishes while muted
-                # Swap back to default mic after TTS finishes
+                # Swap back to default mic after TTS finishes.
+                # Skip when the BT workaround is active: the built-in mic
+                # stays in use for the entire session; no swap-back needed.
                 if voice_controller and voice_controller._wakeword_listener:
-                    voice_controller._wakeword_listener.use_default_mic()
+                    if not voice_controller.bt_workaround_active:
+                        voice_controller._wakeword_listener.use_default_mic()
 
             t_done = time.monotonic()
             logger.debug("TOTAL dequeue->done: %.0fms", (t_done - t0) * 1000)
@@ -337,6 +344,7 @@ def stop_daemon():
 
 def handle_shutdown(signum, frame):
     logger.info("Shutting down...")
+    get_device_manager().stop_monitoring()
     PID_FILE.unlink(missing_ok=True)
     LOCK_FILE.unlink(missing_ok=True)
     START_TS_FILE.unlink(missing_ok=True)
@@ -445,6 +453,11 @@ def start(daemonize: bool = False):
     logger.info("Loading TTS engine (models will be auto-downloaded if missing)...")
     engine.load()
 
+    # Start background audio device monitoring so device changes (e.g. connecting
+    # AirPods) are detected within ~2 seconds rather than up to 30 seconds.
+    get_device_manager().start_monitoring()
+    logger.info("Audio device monitoring started.")
+
     # Session greeting: chime + spoken confirmation
     try:
         if config.audio.chimes:
@@ -472,6 +485,7 @@ def start(daemonize: bool = False):
     except KeyboardInterrupt:
         if voice_controller:
             voice_controller.stop()
+        get_device_manager().stop_monitoring()
         handle_shutdown(None, None)
 
 

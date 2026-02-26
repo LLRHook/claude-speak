@@ -17,7 +17,7 @@ import time
 from typing import Callable, Optional
 
 from .audio_devices import get_device_manager
-from .config import WakeWordConfig
+from .config import AudioConfig, WakeWordConfig
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +51,22 @@ class WakeWordListener:
       - Wake word model (e.g., "hey_jarvis") -> fires wake callbacks
       - Stop model (e.g., "stop.onnx") -> fires stop callbacks
 
-    During TTS playback, swaps to the built-in mic to avoid Bluetooth
-    profile switching on wireless headphones.
+    Bluetooth mic workaround
+    ------------------------
+    When audio is output through a Bluetooth device (e.g. AirPods), opening a
+    mic InputStream normally triggers SCO (Synchronous Connection-Oriented)
+    mode, which degrades audio quality to telephony-grade mono.
+
+    If ``audio_config.bt_mic_workaround`` is True (default), the listener
+    detects at startup whether the system default output device is Bluetooth.
+    If so, it always uses the built-in mic for the entire session.  This
+    avoids the profile switch entirely, at the cost of slightly different
+    ambient noise characteristics during wake-word listening.
+
+    When BT is not the output device, or the workaround is disabled, the
+    legacy behaviour applies: the built-in mic is used only during TTS
+    playback (signalled by ``_swap_mic_event``), and the default mic is used
+    at all other times.
 
     Thread safety
     -------------
@@ -61,7 +75,8 @@ class WakeWordListener:
       - **Main thread**: calls start(), stop(), pause(), resume(),
         use_builtin_mic(), use_default_mic(), reads is_running.
       - **wakeword-listener thread** (_listen_loop): reads _running_event,
-        _paused_event, _swap_mic_event; writes _model, _builtin_mic_id.
+        _paused_event, _swap_mic_event; writes _model, _builtin_mic_id,
+        _bt_always_builtin.
       - **Daemon callback threads**: may invoke on_wake / on_stop_phrase
         callbacks, which in turn call pause()/resume()/use_*_mic() from
         the voice-input-cycle thread.
@@ -86,6 +101,15 @@ class WakeWordListener:
                       use_default_mic).
           Read by:    listener thread (_listen_loop).
           Protection: Event is inherently thread-safe.
+          Note: when _bt_always_builtin is True this event is a no-op
+          because the built-in mic is used unconditionally.
+
+      _bt_always_builtin (bool)
+          True when BT output is detected at startup and bt_mic_workaround
+          is enabled. Written once by the listener thread at startup; read
+          by the same thread throughout the session. Not written by any
+          other thread after that point.
+          Protection: single-writer after startup; safe without a lock.
 
       _wake_callbacks / _stop_phrase_callbacks (lists)
           Written by: main thread (on_wake, on_stop_phrase) before start().
@@ -104,8 +128,13 @@ class WakeWordListener:
           Protection: single-thread access; no lock needed.
     """
 
-    def __init__(self, config: Optional[WakeWordConfig] = None) -> None:
+    def __init__(
+        self,
+        config: Optional[WakeWordConfig] = None,
+        audio_config: Optional[AudioConfig] = None,
+    ) -> None:
         self._config = config or WakeWordConfig()
+        self._audio_config = audio_config or AudioConfig()
         self._wake_callbacks: list[Callable[[], None]] = []
         self._stop_phrase_callbacks: list[Callable[[str], None]] = []
         self._thread: Optional[threading.Thread] = None
@@ -115,6 +144,11 @@ class WakeWordListener:
         self._running_event = threading.Event()    # set() = running, clear() = stopped
         self._paused_event = threading.Event()     # set() = paused,  clear() = active
         self._swap_mic_event = threading.Event()   # set() = builtin, clear() = default
+
+        # Set by _listen_loop at startup when BT output is detected.
+        # When True, the built-in mic is used for the entire session
+        # regardless of _swap_mic_event.
+        self._bt_always_builtin: bool = False
 
         self._model = None
         self._stop_model_name: Optional[str] = None  # key in prediction dict
@@ -239,9 +273,26 @@ class WakeWordListener:
             self._running_event.clear()
             return
 
-        self._builtin_mic_id = get_device_manager().find_builtin_mic()
+        dm = get_device_manager()
+        self._builtin_mic_id = dm.find_builtin_mic()
         if self._builtin_mic_id is not None:
             logger.info("Built-in mic: device %d", self._builtin_mic_id)
+
+        # Bluetooth workaround: if the default output device is Bluetooth and
+        # the workaround is enabled, always use the built-in mic so we never
+        # trigger an SCO profile switch.
+        if self._audio_config.bt_mic_workaround and self._builtin_mic_id is not None:
+            try:
+                default_output = dm.get_default_output()
+                if dm.is_bluetooth(default_output):
+                    self._bt_always_builtin = True
+                    logger.info(
+                        "Bluetooth output detected (device %d), using built-in mic "
+                        "for wake word (bt_mic_workaround=True)",
+                        default_output,
+                    )
+            except Exception as e:
+                logger.warning("Could not determine output device for BT check: %s", e)
 
         logger.info("Wake word listener ready")
 
@@ -254,11 +305,17 @@ class WakeWordListener:
                     time.sleep(0.1)
                     continue
 
-                # Pick device: use built-in mic during TTS to avoid BT
-                # profile switch; otherwise use the system default.
-                device = None
-                if self._swap_mic_event.is_set() and self._builtin_mic_id is not None:
-                    device = self._builtin_mic_id
+                # Pick device:
+                #   _bt_always_builtin: BT output detected at startup; use
+                #       built-in mic for the entire session to avoid SCO mode.
+                #   _swap_mic_event:    legacy per-TTS swap signal; use
+                #       built-in mic only while the event is set.
+                #   Neither:            use the system default mic (None).
+                use_builtin = (
+                    self._bt_always_builtin
+                    or self._swap_mic_event.is_set()
+                )
+                device = self._builtin_mic_id if use_builtin and self._builtin_mic_id is not None else None
 
                 try:
                     with sd.InputStream(
@@ -269,8 +326,10 @@ class WakeWordListener:
                         device=device,
                     ) as stream:
                         # Snapshot the current mic-swap state so we can
-                        # detect when it changes and re-open the stream
-                        # on the new device.
+                        # detect when it changes and re-open the stream on
+                        # the new device.  In bt_always_builtin mode the
+                        # state never changes, so the inner loop runs until
+                        # paused or stopped.
                         current_swap = self._swap_mic_event.is_set()
                         while (self._running_event.is_set()
                                and not self._paused_event.is_set()

@@ -70,28 +70,10 @@ def play_stop_chime(device: int | None = None, volume: float = 0.3):
 
 
 def play_ack_chime(device: int | None = None, volume: float = 0.3):
-    """Spoken 'Got it' — voice input received, processing."""
-    try:
-        import soundfile as sf
-    except ImportError:
-        logger.warning(
-            "soundfile is not installed — ack chime falling back to tone. "
-            "Install it with: pip install soundfile"
-        )
-        sr = 24000
-        samples = _generate_tone(783.99, 0.08, sr)
-        _play(samples, volume, device, sr)
-        return
-    from pathlib import Path
-    ack_path = Path(__file__).resolve().parent / "assets" / "ack.wav"
-    if not ack_path.exists():
-        # Fallback to a quick tone if the asset is missing
-        sr = 24000
-        samples = _generate_tone(783.99, 0.08, sr)
-        _play(samples, volume, device, sr)
-        return
-    samples, sr = sf.read(str(ack_path), dtype="float32")
-    # Add 250ms silence tail so playback doesn't clip the end
-    tail = np.zeros(int(sr * 0.25), dtype=np.float32)
-    samples = np.concatenate([samples, tail])
+    """Quick high chime (G5 -> B5) — voice input received, processing."""
+    sr = 24000
+    note1 = _generate_tone(783.99, 0.06, sr)  # G5
+    gap = np.zeros(int(sr * 0.02), dtype=np.float32)
+    note2 = _generate_tone(987.77, 0.10, sr)  # B5
+    samples = np.concatenate([note1, gap, note2])
     _play(samples, volume, device, sr)
