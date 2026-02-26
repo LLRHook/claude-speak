@@ -1,7 +1,14 @@
 #!/bin/bash
 # speak-response.sh — Claude Code hook (PostToolUse + Stop).
-# Thin: parse transcript, strip markdown, write to queue.
-# Does NOT manage the daemon — SessionStart hook handles that.
+#
+# DEPRECATED: This shell script is a compatibility wrapper.  The actual logic
+# now lives in claude_speak/hooks/speak_response.py which provides better
+# error handling, type safety, and testability.
+#
+# Behaviour:
+#   1. Try to run the Python hook.
+#   2. If the Python hook is not available or fails, fall back to the original
+#      shell logic below.
 #
 # Error handling: every failure path exits 0 so errors never propagate to
 # Claude Code. Set CLAUDE_SPEAK_DEBUG=1 to log errors to stderr.
@@ -9,19 +16,51 @@
 # Intentionally NOT using set -euo pipefail — every failure is handled
 # explicitly and must exit 0.
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+DEBUG="${CLAUDE_SPEAK_DEBUG:-}"
+
+debug_log() {
+  [[ -n "$DEBUG" ]] && echo "[claude-speak-hook] $*" >&2
+  return 0
+}
+
+# --- Read stdin into a variable (must happen before any subprocess consumes it) ---
+INPUT=$(cat)
+
+# --- Try the Python hook first ---
+PYTHON_HOOK="$REPO_DIR/claude_speak/hooks/speak_response.py"
+if [[ -f "$PYTHON_HOOK" ]]; then
+  # Prefer python3, fall back to python
+  PYTHON_BIN=""
+  if command -v python3 &>/dev/null; then
+    PYTHON_BIN="python3"
+  elif command -v python &>/dev/null; then
+    PYTHON_BIN="python"
+  fi
+
+  if [[ -n "$PYTHON_BIN" ]]; then
+    debug_log "Delegating to Python hook via $PYTHON_BIN"
+    echo "$INPUT" | PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+      "$PYTHON_BIN" -m claude_speak.hooks.speak_response 2>/dev/null
+    PY_EXIT=$?
+    if [[ $PY_EXIT -eq 0 ]]; then
+      exit 0
+    fi
+    debug_log "Python hook exited with $PY_EXIT, falling back to shell"
+  fi
+fi
+
+# =========================================================================
+# FALLBACK: Original shell logic (kept for backward compatibility)
+# =========================================================================
+
 TOGGLE_FILE="$HOME/.claude-speak-enabled"
 QUEUE_DIR="/tmp/claude-speak-queue"
 POS_FILE="/tmp/claude-speak-pos"
 PERF_LOG="/tmp/claude-speak-perf.log"
 PERF_ENABLED="${CLAUDE_SPEAK_PERF:-}"
 HOOK_LOCK="/tmp/claude-speak-hook.lock"
-DEBUG="${CLAUDE_SPEAK_DEBUG:-}"
-
-# --- Debug helper ---
-debug_log() {
-  [[ -n "$DEBUG" ]] && echo "[claude-speak-hook] $*" >&2
-  return 0
-}
 
 # --- Gate ---
 if [[ ! -f "$TOGGLE_FILE" ]]; then
@@ -50,9 +89,6 @@ if [[ $_lock_acquired -eq 0 ]]; then
 fi
 
 [[ -n "$PERF_ENABLED" ]] && T_START=$(perl -MTime::HiRes=time -e 'printf "%.3f\n", time()')
-
-# --- Read hook input (single jq call instead of three) ---
-INPUT=$(cat)
 
 # Check that jq is available
 if ! command -v jq &>/dev/null; then
