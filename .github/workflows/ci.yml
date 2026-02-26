@@ -47,7 +47,8 @@ jobs:
         run: pip install -e .[dev]
 
       - name: Run tests
-        run: python -m pytest tests/ -q -m "not requires_model"
+        timeout-minutes: 5
+        run: python -m pytest tests/ -q -m "not requires_model" --timeout=60
 
   build:
     name: Build

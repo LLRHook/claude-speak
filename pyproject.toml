@@ -54,6 +54,7 @@ macos-extras = [
 dev = [
     "ruff",
     "pytest",
+    "pytest-timeout",
     "mypy",
     "pre-commit",
 ]
