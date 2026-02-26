@@ -210,6 +210,9 @@ def _create_ipc_server(
         text = msg.get("text", "")
         if not text:
             return {"ok": False, "error": "empty text"}
+        # Truncate before writing to disk to avoid large file I/O
+        if len(text) > 10_000:
+            text = text[-10_000:]
         Q.enqueue(text)
         # Wake the main loop so it picks up the new item immediately
         loop.call_soon_threadsafe(queue_ready.set)
@@ -358,12 +361,17 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
         if not text:
             continue
 
-        # Skip excessively large queue items (e.g. full transcript dumps from
-        # stale position tracker). 10K chars ~= 2500 words ~= 15 min of speech.
+        # Truncate excessively large queue items (e.g. full transcript dumps
+        # from stale position tracker).  Keep the *tail* so the user hears the
+        # most recent part of the response rather than nothing at all.
+        # 10K chars ~= 2500 words ~= 15 min of speech.
         MAX_QUEUE_CHARS = 10_000
         if len(text) > MAX_QUEUE_CHARS:
-            logger.warning("Skipping oversized queue item (%d chars > %d max)", len(text), MAX_QUEUE_CHARS)
-            continue
+            logger.warning(
+                "Truncating oversized queue item (%d chars > %d max, keeping tail)",
+                len(text), MAX_QUEUE_CHARS,
+            )
+            text = text[-MAX_QUEUE_CHARS:]
 
         # Measure time from queue file creation to pickup
         try:
@@ -881,6 +889,10 @@ def start(daemonize: bool = False):
     try:
         asyncio.run(run_loop(config, engine, voice_controller))
     except KeyboardInterrupt:
+        pass
+    except Exception:
+        logger.exception("Fatal error in run_loop")
+    finally:
         if hotkey_manager:
             hotkey_manager.stop()
         if media_key_handler:
