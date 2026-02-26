@@ -19,6 +19,7 @@ from pathlib import Path
 
 from .audio_devices import get_device_manager
 from .config import Config, CONFIG_PATH, PID_FILE, TOGGLE_FILE, MUTE_FILE, PLAYING_FILE, LOG_FILE, QUEUE_DIR, load_config
+from .ipc import IPCServer
 from .normalizer import normalize, chunk_text
 from .tts import TTSEngine, create_backend
 from .chimes import play_ready_chime, play_error_chime, play_stop_chime
@@ -182,6 +183,110 @@ async def _wait_for_unmute(poll: float = 0.2) -> None:
         await asyncio.sleep(poll)
 
 
+def _create_ipc_server(
+    engine: TTSEngine,
+    config: Config,
+    queue_ready: asyncio.Event,
+    loop: asyncio.AbstractEventLoop,
+) -> IPCServer:
+    """Create and configure the IPC server with message handlers.
+
+    Returns an IPCServer instance (not yet started).
+    """
+    server = IPCServer()
+
+    def _handle_speak(msg: dict) -> dict:
+        text = msg.get("text", "")
+        if not text:
+            return {"ok": False, "error": "empty text"}
+        Q.enqueue(text)
+        # Wake the main loop so it picks up the new item immediately
+        loop.call_soon_threadsafe(queue_ready.set)
+        return {"ok": True}
+
+    def _handle_stop(msg: dict) -> dict:
+        engine.stop()
+        Q.clear()
+        return {"ok": True}
+
+    def _handle_status(msg: dict) -> dict:
+        uptime = 0.0
+        try:
+            uptime = time.time() - float(START_TS_FILE.read_text().strip())
+        except (OSError, ValueError):
+            pass
+        return {
+            "ok": True,
+            "queue_depth": Q.depth(),
+            "enabled": TOGGLE_FILE.exists(),
+            "uptime": round(uptime, 1),
+        }
+
+    def _handle_pause(msg: dict) -> dict:
+        MUTE_FILE.touch()
+        engine.stop()
+        return {"ok": True}
+
+    def _handle_resume(msg: dict) -> dict:
+        MUTE_FILE.unlink(missing_ok=True)
+        return {"ok": True}
+
+    def _handle_set_voice(msg: dict) -> dict:
+        voice = msg.get("voice", "")
+        if not voice or not isinstance(voice, str):
+            return {"ok": False, "error": "missing or invalid 'voice' parameter"}
+        config.tts.voice = voice
+        return {"ok": True, "voice": voice}
+
+    def _handle_set_speed(msg: dict) -> dict:
+        speed = msg.get("speed")
+        if speed is None:
+            return {"ok": False, "error": "missing 'speed' parameter"}
+        try:
+            speed = float(speed)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": f"invalid speed value: {speed!r}"}
+        if speed <= 0:
+            return {"ok": False, "error": "speed must be positive"}
+        config.tts.speed = speed
+        return {"ok": True, "speed": speed}
+
+    def _handle_set_volume(msg: dict) -> dict:
+        volume = msg.get("volume")
+        if volume is None:
+            return {"ok": False, "error": "missing 'volume' parameter"}
+        try:
+            volume = float(volume)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": f"invalid volume value: {volume!r}"}
+        if volume < 0.1 or volume > 1.0:
+            return {"ok": False, "error": "volume must be between 0.1 and 1.0"}
+        config.tts.volume = volume
+        return {"ok": True, "volume": volume}
+
+    def _handle_queue_depth(msg: dict) -> dict:
+        return {"ok": True, "depth": Q.depth()}
+
+    def _handle_list_voices(msg: dict) -> dict:
+        try:
+            voices = engine.list_voices()
+        except Exception as exc:
+            return {"ok": False, "error": f"failed to list voices: {exc}"}
+        return {"ok": True, "voices": voices}
+
+    server.register_handler("speak", _handle_speak)
+    server.register_handler("stop", _handle_stop)
+    server.register_handler("status", _handle_status)
+    server.register_handler("pause", _handle_pause)
+    server.register_handler("resume", _handle_resume)
+    server.register_handler("set_voice", _handle_set_voice)
+    server.register_handler("set_speed", _handle_set_speed)
+    server.register_handler("set_volume", _handle_set_volume)
+    server.register_handler("queue_depth", _handle_queue_depth)
+    server.register_handler("list_voices", _handle_list_voices)
+    return server
+
+
 async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
     """Main loop: watch queue, normalize, chunk, speak."""
     Q.ensure_queue_dir()
@@ -191,6 +296,13 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
     queue_ready = asyncio.Event()
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGUSR1, queue_ready.set)
+
+    # Start IPC server (Unix domain socket) alongside file-based queue
+    ipc_server = _create_ipc_server(engine, config, queue_ready, loop)
+    try:
+        ipc_server.start()
+    except Exception as exc:
+        logger.error("Failed to start IPC server: %s (falling back to file queue only)", exc)
 
     # Track config file mtime for hot-reload
     try:
@@ -478,6 +590,9 @@ def handle_shutdown(signum, frame):
     START_TS_FILE.unlink(missing_ok=True)
     MUTE_FILE.unlink(missing_ok=True)
     PLAYING_FILE.unlink(missing_ok=True)
+    # Clean up IPC socket file
+    from .ipc import SOCKET_PATH
+    SOCKET_PATH.unlink(missing_ok=True)
     sys.exit(0)
 
 
@@ -599,10 +714,42 @@ def start(daemonize: bool = False):
 
     # Start voice controller (wake word + voice input) if enabled
     voice_controller = None
+    interrupt_count = 0
     if config.wakeword.enabled:
         try:
             from .voice_controller import VoiceController
-            voice_controller = VoiceController(config, tts_stop_callback=engine.stop)
+
+            def _interrupt_callback():
+                """Stop TTS engine, clear queue, and log discarded items."""
+                nonlocal interrupt_count
+                interrupt_count += 1
+                # Collect queued text before clearing so we can log what was discarded.
+                discarded = Q.peek()
+                discarded_texts = []
+                for f in discarded:
+                    try:
+                        discarded_texts.append(f.read_text(encoding="utf-8").strip())
+                    except (FileNotFoundError, PermissionError, OSError):
+                        pass
+                engine.stop()
+                Q.clear()
+                if discarded_texts:
+                    total_chars = sum(len(t) for t in discarded_texts)
+                    logger.info(
+                        "Interrupt #%d: discarded %d queued item(s) (%d chars)",
+                        interrupt_count, len(discarded_texts), total_chars,
+                    )
+                    for i, txt in enumerate(discarded_texts):
+                        preview = txt[:80] + ("..." if len(txt) > 80 else "")
+                        logger.debug("  discarded[%d]: %s", i, preview)
+                else:
+                    logger.info("Interrupt #%d: queue was empty", interrupt_count)
+
+            voice_controller = VoiceController(
+                config,
+                tts_stop_callback=engine.stop,
+                interrupt_callback=_interrupt_callback,
+            )
             voice_controller.start()
             logger.info("Voice controller started.")
         except Exception as e:
