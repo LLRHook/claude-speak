@@ -68,7 +68,7 @@ def _is_superwhisper_running() -> bool:
     """Check whether the Superwhisper app process is currently running."""
     try:
         result = subprocess.run(
-            ["pgrep", "-xq", "Superwhisper"],
+            ["pgrep", "-xiq", "superwhisper"],
             capture_output=True,
         )
         return result.returncode == 0
