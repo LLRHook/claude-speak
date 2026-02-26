@@ -162,10 +162,25 @@ class VoiceController:
     # ------------------------------------------------------------------
 
     def _start_wakeword(self) -> bool:
-        self._wakeword_listener = WakeWordListener(self._config.wakeword)
+        self._wakeword_listener = WakeWordListener(
+            self._config.wakeword,
+            audio_config=self._config.audio,
+        )
         self._wakeword_listener.on_wake(self._on_wake_word)
         self._wakeword_listener.on_stop_phrase(self.handle_stop)
         return self._wakeword_listener.start()
+
+    @property
+    def bt_workaround_active(self) -> bool:
+        """True when the BT mic workaround is engaged for this session.
+
+        When True, the wake word listener is already using the built-in mic
+        for the entire session, so callers (e.g. the daemon) can skip the
+        per-TTS ``use_builtin_mic()`` / ``use_default_mic()`` calls.
+        """
+        if self._wakeword_listener is None:
+            return False
+        return self._wakeword_listener._bt_always_builtin
 
     def _on_wake_word(self) -> None:
         """Callback invoked when the wake word is detected.

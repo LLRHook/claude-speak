@@ -63,6 +63,13 @@ greeting = "Ready."
 # Does not affect TTS voice output volume.
 volume = 0.3
 
+# When the default audio output is a Bluetooth device (AirPods, etc.),
+# always use the built-in mic for wake word detection instead of the BT mic.
+# This prevents the Bluetooth stack from switching into SCO (telephony) mode,
+# which degrades audio quality to narrow-band mono.
+# Set to false only if you specifically want to use the BT mic for wake words.
+bt_mic_workaround = true   # use built-in mic when output is Bluetooth (avoids SCO mode)
+
 [daemon]
 # Logging level: DEBUG, INFO, WARNING, ERROR.
 # DEBUG enables performance timing logs (previously gated by CLAUDE_SPEAK_PERF).

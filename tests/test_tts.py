@@ -370,3 +370,216 @@ class TestMaybeResolveDevice:
             engine = _make_engine(device="airpods")
             engine._maybe_resolve_device()
             mock_dm.maybe_resolve_output.assert_called_once_with("airpods")
+
+
+# ---------------------------------------------------------------------------
+# Tests: device disconnection — _ensure_stream falls back when device gone
+# ---------------------------------------------------------------------------
+
+class TestDeviceDisconnectionEnsureStream:
+    """Tests for graceful fallback when the output device disappears mid-stream."""
+
+    def test_reuse_path_device_still_available(self):
+        """Active stream is reused without creating a new one when device is present."""
+        mock_sd = _mock_sd()
+        mock_stream = MagicMock()
+        mock_stream.active = True
+        mock_sd.OutputStream.return_value = mock_stream
+
+        mock_dm = MagicMock(spec=AudioDeviceManager)
+        mock_dm.is_device_available.return_value = True
+        mock_dm.get_default_output.return_value = 0
+
+        with patch.object(tts_module, "sd", mock_sd), \
+             patch("claude_speak.tts.get_device_manager", return_value=mock_dm):
+            engine = _make_engine()
+            engine._output_device = 2
+            engine._stream = mock_stream
+            engine._sample_rate = 24000
+
+            engine._ensure_stream(24000)
+
+            # Stream was reused — no new OutputStream created
+            mock_sd.OutputStream.assert_not_called()
+            mock_dm.is_device_available.assert_called_once_with(2)
+
+    def test_reuse_path_device_disconnected_falls_back_to_default(self):
+        """When device vanishes, stream is closed, cache invalidated, default used."""
+        mock_sd = _mock_sd()
+        new_stream = MagicMock()
+        mock_sd.OutputStream.return_value = new_stream
+
+        old_stream = MagicMock()
+        old_stream.active = True
+
+        mock_dm = MagicMock(spec=AudioDeviceManager)
+        mock_dm.is_device_available.return_value = False  # AirPods gone
+        mock_dm.get_default_output.return_value = 0
+
+        with patch.object(tts_module, "sd", mock_sd), \
+             patch("claude_speak.tts.get_device_manager", return_value=mock_dm):
+            engine = _make_engine()
+            engine._output_device = 5  # AirPods device id
+            engine._stream = old_stream
+            engine._sample_rate = 24000
+
+            engine._ensure_stream(24000)
+
+            # Old stream was closed
+            old_stream.close.assert_called_once()
+            # Cache was invalidated
+            mock_dm.invalidate_cache.assert_called_once()
+            # Fell back to default device
+            mock_dm.get_default_output.assert_called()
+            # A new stream was created
+            mock_sd.OutputStream.assert_called_once()
+
+    def test_reuse_skipped_when_output_device_is_none(self):
+        """When _output_device is None the availability check is skipped (stream reused)."""
+        mock_sd = _mock_sd()
+        mock_stream = MagicMock()
+        mock_stream.active = True
+        mock_sd.OutputStream.return_value = mock_stream
+
+        mock_dm = MagicMock(spec=AudioDeviceManager)
+        mock_dm.get_default_output.return_value = 0
+
+        with patch.object(tts_module, "sd", mock_sd), \
+             patch("claude_speak.tts.get_device_manager", return_value=mock_dm):
+            engine = _make_engine()
+            engine._output_device = None  # no specific device tracked
+            engine._stream = mock_stream
+            engine._sample_rate = 24000
+
+            engine._ensure_stream(24000)
+
+            # is_device_available should NOT be called when device is None
+            mock_dm.is_device_available.assert_not_called()
+            # Stream reused
+            mock_sd.OutputStream.assert_not_called()
+
+    def test_disconnection_logs_warning(self, caplog):
+        """Logs 'Output device disconnected' when AirPods vanish."""
+        import logging
+        mock_sd = _mock_sd()
+        new_stream = MagicMock()
+        mock_sd.OutputStream.return_value = new_stream
+
+        old_stream = MagicMock()
+        old_stream.active = True
+
+        mock_dm = MagicMock(spec=AudioDeviceManager)
+        mock_dm.is_device_available.return_value = False
+        mock_dm.get_default_output.return_value = 0
+
+        with patch.object(tts_module, "sd", mock_sd), \
+             patch("claude_speak.tts.get_device_manager", return_value=mock_dm), \
+             caplog.at_level(logging.WARNING, logger="claude_speak.tts"):
+            engine = _make_engine()
+            engine._output_device = 5
+            engine._stream = old_stream
+            engine._sample_rate = 24000
+
+            engine._ensure_stream(24000)
+
+        assert any("Output device disconnected" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Tests: device disconnection — _write_samples cache invalidation
+# ---------------------------------------------------------------------------
+
+class TestDeviceDisconnectionWriteSamples:
+    """Tests for cache invalidation in _write_samples on PortAudio write failure."""
+
+    def test_write_failure_device_gone_invalidates_cache(self):
+        """PortAudioError + device unavailable → cache invalidated, device set to None."""
+        mock_sd = _mock_sd()
+        mock_stream = MagicMock()
+        mock_stream.write.side_effect = mock_sd.PortAudioError("device disconnected")
+
+        mock_dm = MagicMock(spec=AudioDeviceManager)
+        mock_dm.is_device_available.return_value = False  # device gone
+
+        with patch.object(tts_module, "sd", mock_sd), \
+             patch("claude_speak.tts.get_device_manager", return_value=mock_dm):
+            engine = _make_engine()
+            engine._stream = mock_stream
+            engine._output_device = 5
+            engine._stopped.clear()
+
+            samples = np.zeros(100, dtype=np.float32)
+            engine._write_samples(samples)
+
+            mock_dm.is_device_available.assert_called_once_with(5)
+            mock_dm.invalidate_cache.assert_called_once()
+            assert engine._output_device is None
+            assert engine._stream is None
+
+    def test_write_failure_device_still_present_no_cache_invalidation(self):
+        """PortAudioError but device still present → cache NOT invalidated."""
+        mock_sd = _mock_sd()
+        mock_stream = MagicMock()
+        mock_stream.write.side_effect = mock_sd.PortAudioError("transient error")
+
+        mock_dm = MagicMock(spec=AudioDeviceManager)
+        mock_dm.is_device_available.return_value = True  # device still there
+
+        with patch.object(tts_module, "sd", mock_sd), \
+             patch("claude_speak.tts.get_device_manager", return_value=mock_dm):
+            engine = _make_engine()
+            engine._stream = mock_stream
+            engine._output_device = 5
+            engine._stopped.clear()
+
+            samples = np.zeros(100, dtype=np.float32)
+            engine._write_samples(samples)
+
+            mock_dm.is_device_available.assert_called_once_with(5)
+            mock_dm.invalidate_cache.assert_not_called()
+            # output_device preserved (not cleared)
+            assert engine._output_device == 5
+
+    def test_write_failure_device_id_none_skips_availability_check(self):
+        """When _output_device is None, availability check and cache invalidation are skipped."""
+        mock_sd = _mock_sd()
+        mock_stream = MagicMock()
+        mock_stream.write.side_effect = mock_sd.PortAudioError("error")
+
+        mock_dm = MagicMock(spec=AudioDeviceManager)
+
+        with patch.object(tts_module, "sd", mock_sd), \
+             patch("claude_speak.tts.get_device_manager", return_value=mock_dm):
+            engine = _make_engine()
+            engine._stream = mock_stream
+            engine._output_device = None
+            engine._stopped.clear()
+
+            samples = np.zeros(100, dtype=np.float32)
+            engine._write_samples(samples)
+
+            mock_dm.is_device_available.assert_not_called()
+            mock_dm.invalidate_cache.assert_not_called()
+
+    def test_write_failure_logs_warning(self, caplog):
+        """PortAudio write error logs 'Audio write failed, device may have disconnected'."""
+        import logging
+        mock_sd = _mock_sd()
+        mock_stream = MagicMock()
+        mock_stream.write.side_effect = mock_sd.PortAudioError("gone")
+
+        mock_dm = MagicMock(spec=AudioDeviceManager)
+        mock_dm.is_device_available.return_value = False
+
+        with patch.object(tts_module, "sd", mock_sd), \
+             patch("claude_speak.tts.get_device_manager", return_value=mock_dm), \
+             caplog.at_level(logging.WARNING, logger="claude_speak.tts"):
+            engine = _make_engine()
+            engine._stream = mock_stream
+            engine._output_device = 5
+            engine._stopped.clear()
+
+            samples = np.zeros(100, dtype=np.float32)
+            engine._write_samples(samples)
+
+        assert any("Audio write failed" in r.message for r in caplog.records)

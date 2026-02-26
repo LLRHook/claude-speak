@@ -68,6 +68,7 @@ class AudioConfig:
     chimes: bool = True
     greeting: str = "Ready."
     volume: float = 0.3
+    bt_mic_workaround: bool = True  # use built-in mic when output is BT
 
 
 @dataclass
