@@ -149,6 +149,8 @@ class IPCServer:
         self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server_sock.bind(str(self._socket_path))
+        # Restrict socket to owner-only access
+        os.chmod(str(self._socket_path), 0o600)
         self._server_sock.listen(16)
         self._server_sock.setblocking(False)
 
@@ -243,8 +245,16 @@ class IPCServer:
 
             if not isinstance(msg, dict):
                 response = {"ok": False, "error": "expected JSON object"}
+            elif not isinstance(msg.get("type"), str) or not msg.get("type"):
+                response = {"ok": False, "error": "'type' must be a non-empty string"}
             else:
-                msg_type = msg.get("type", "")
+                # Validate known field types for safety
+                if "text" in msg and not isinstance(msg["text"], str):
+                    response = {"ok": False, "error": "'text' must be a string"}
+                    reply = json.dumps(response) + "\n"
+                    conn.sendall(reply.encode("utf-8"))
+                    return
+                msg_type = msg["type"]
                 handler = self._handlers.get(msg_type)
                 if handler is None:
                     response = {"ok": False, "error": f"unknown message type: {msg_type!r}"}

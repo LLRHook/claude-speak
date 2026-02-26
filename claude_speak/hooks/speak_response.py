@@ -270,6 +270,7 @@ def enqueue_text(text: str, queue_dir: Path = QUEUE_DIR) -> Optional[Path]:
     """
     try:
         queue_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(queue_dir, 0o700)
     except OSError as exc:
         _debug(f"Failed to create queue dir: {exc}")
         return None
@@ -278,6 +279,7 @@ def enqueue_text(text: str, queue_dir: Path = QUEUE_DIR) -> Optional[Path]:
     path = queue_dir / f"{timestamp}.txt"
     try:
         path.write_text(text, encoding="utf-8")
+        os.chmod(path, 0o600)
     except OSError as exc:
         _debug(f"Failed to write queue file: {exc}")
         return None

@@ -5,9 +5,13 @@ Reads claude-speak.toml and provides defaults.
 
 from __future__ import annotations
 
+import logging
 import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
+
+_config_logger = logging.getLogger(__name__)
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = PROJECT_DIR / "claude-speak.toml"
@@ -171,6 +175,33 @@ def load_config() -> Config:
         config.tts.speed = float(os.environ["CLAUDE_SPEAK_SPEED"])
     if os.environ.get("CLAUDE_SPEAK_DEVICE"):
         config.tts.device = os.environ["CLAUDE_SPEAK_DEVICE"]
+
+    # Warn if config file contains API keys and has world-readable permissions
+    if config.tts.elevenlabs_api_key:
+        try:
+            mode = CONFIG_PATH.stat().st_mode
+            if mode & (stat.S_IRGRP | stat.S_IROTH):
+                _config_logger.warning(
+                    "Config file %s contains API keys but is readable by group/others "
+                    "(mode %o). Consider running: chmod 600 %s",
+                    CONFIG_PATH, stat.S_IMODE(mode), CONFIG_PATH,
+                )
+        except OSError:
+            pass
+
+    # Also check user-level config file
+    user_config = Path.home() / ".claude-speak" / "config.toml"
+    if user_config.exists():
+        try:
+            mode = user_config.stat().st_mode
+            if mode & (stat.S_IRGRP | stat.S_IROTH):
+                _config_logger.warning(
+                    "User config %s may contain API keys but is readable by group/others "
+                    "(mode %o). Consider running: chmod 600 %s",
+                    user_config, stat.S_IMODE(mode), user_config,
+                )
+        except OSError:
+            pass
 
     # Resolve model paths: fall back to project-local models/ if user-level missing
     _LOCAL_MODELS = PROJECT_DIR / "models"

@@ -6,6 +6,7 @@ Producer (hook script) writes text files. Consumer (daemon) reads and speaks the
 from __future__ import annotations
 
 import contextlib
+import os
 import time
 from pathlib import Path
 
@@ -14,6 +15,8 @@ from .config import QUEUE_DIR
 
 def ensure_queue_dir() -> None:
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    # Restrict queue directory to owner-only access
+    os.chmod(QUEUE_DIR, 0o700)
 
 
 def enqueue(text: str) -> Path:
@@ -23,6 +26,7 @@ def enqueue(text: str) -> Path:
     timestamp = f"{time.time():.6f}"
     path = QUEUE_DIR / f"{timestamp}.txt"
     path.write_text(text, encoding="utf-8")
+    os.chmod(path, 0o600)
     return path
 
 
@@ -38,6 +42,7 @@ def enqueue_chunks(chunks: list[str]) -> list[Path]:
         timestamp = f"{base_time + i * 0.000001:.6f}"
         path = QUEUE_DIR / f"{timestamp}.txt"
         path.write_text(chunk, encoding="utf-8")
+        os.chmod(path, 0o600)
         paths.append(path)
     return paths
 

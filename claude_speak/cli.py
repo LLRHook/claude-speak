@@ -6,6 +6,7 @@ Usage:
     claude-speak start          # Start daemon in background
     claude-speak stop           # Stop daemon
     claude-speak status         # Show daemon status
+    claude-speak status -m      # Show status with top memory allocations
     claude-speak restart        # Restart daemon
     claude-speak test "text"    # Speak text immediately (no daemon needed)
     claude-speak say "text"     # Alias for test
@@ -31,6 +32,10 @@ Usage:
     claude-speak preview --all            # Speak a sample in every available voice
     claude-speak train-wakeword "hey claude"     # Train a custom wake word model
     claude-speak train-wakeword "hey claude" --samples 15
+    claude-speak check-permissions              # Check macOS permissions (mic, accessibility)
+    claude-speak benchmark             # Profile the TTS pipeline latency
+    claude-speak benchmark --count 20  # Profile with 20 texts
+    claude-speak benchmark --output results.json  # Save JSON report
 """
 
 from __future__ import annotations
@@ -85,10 +90,17 @@ def cmd_restart() -> None:
     start(daemonize=True)
 
 
-def cmd_status() -> None:
-    """Show daemon status. Try socket first, fall back to PID-based status."""
+def cmd_status(show_memory: bool = False) -> None:
+    """Show daemon status. Try socket first, fall back to PID-based status.
+
+    Args:
+        show_memory: If True, also print top memory allocations (requires
+                     tracemalloc to be enabled in the daemon).
+    """
+    daemon_reachable = False
     resp = _send_ipc({"type": "status"})
     if resp and resp.get("ok"):
+        daemon_reachable = True
         # Socket-based status (richer info from running daemon)
         enabled = resp.get("enabled", False)
         queue_depth = resp.get("queue_depth", 0)
@@ -116,6 +128,27 @@ def cmd_status() -> None:
     print(f"Voice:   {config.tts.voice}")
     print(f"Speed:   {config.tts.speed}")
     print(f"Device:  {config.tts.device}")
+
+    # Memory info (always show RSS when daemon is reachable)
+    if daemon_reachable:
+        mem_resp = _send_ipc({"type": "mem_stats"})
+        if mem_resp and mem_resp.get("ok"):
+            rss = mem_resp.get("rss_mb", 0.0)
+            print(f"Memory:  {rss:.1f} MB RSS")
+            if mem_resp.get("tracemalloc_enabled"):
+                current = mem_resp.get("tracemalloc_current_mb", 0.0)
+                peak = mem_resp.get("tracemalloc_peak_mb", 0.0)
+                print(f"         {current:.1f} MB traced (peak {peak:.1f} MB)")
+                if show_memory:
+                    allocs = mem_resp.get("top_allocations", [])
+                    if allocs:
+                        print("  Top allocations:")
+                        for alloc in allocs:
+                            print(f"    {alloc['size_kb']:.1f} KB  {alloc['count']} blocks  {alloc['file']}")
+                    else:
+                        print("  No allocation data available.")
+            elif show_memory:
+                print("         tracemalloc not enabled (set CLAUDE_SPEAK_TRACEMALLOC=1)")
 
     # Log file
     print(f"Log:     {LOG_FILE}")
@@ -401,6 +434,77 @@ def cmd_train_wakeword() -> None:
     train_wakeword(wake_phrase, output_dir=output_dir, num_samples=num_samples)
 
 
+def cmd_check_permissions() -> None:
+    """Check macOS permissions and report status."""
+    from .permissions import format_results, run_all_checks
+
+    results = run_all_checks()
+    print(format_results(results))
+
+    # Exit with non-zero status if any check failed
+    if any(not r.passed for r in results):
+        sys.exit(1)
+
+
+def cmd_benchmark() -> None:
+    """Profile the TTS pipeline and print latency statistics."""
+    import json as _json
+    from pathlib import Path
+
+    from .profiler import BENCHMARK_TEXTS, BenchmarkReport, PipelineProfiler
+
+    # Parse optional flags
+    count = 10
+    output_file: str | None = None
+    i = 2
+    while i < len(sys.argv):
+        if sys.argv[i] == "--count" and i + 1 < len(sys.argv):
+            try:
+                count = int(sys.argv[i + 1])
+            except ValueError:
+                print(f"Error: --count requires an integer, got '{sys.argv[i + 1]}'")
+                sys.exit(1)
+            i += 2
+        elif sys.argv[i] == "--output" and i + 1 < len(sys.argv):
+            output_file = sys.argv[i + 1]
+            i += 2
+        else:
+            print(f"Unknown argument: {sys.argv[i]}")
+            print("Usage: claude-speak benchmark [--count N] [--output FILE]")
+            sys.exit(1)
+
+    # Select texts: cycle through built-in texts up to `count`
+    texts: list[str] = []
+    for j in range(count):
+        texts.append(BENCHMARK_TEXTS[j % len(BENCHMARK_TEXTS)])
+
+    # Try to load the TTS engine; if unavailable, benchmark without it
+    engine: TTSEngine | None = None
+    try:
+        config = load_config()
+        engine = TTSEngine(config)
+        engine.load()
+        print(f"TTS engine loaded ({engine._backend.name}).")
+    except Exception as e:
+        print(f"TTS engine not available ({e}), benchmarking without TTS generation.")
+        engine = None
+
+    print(f"Running benchmark with {count} texts...")
+    profiler = PipelineProfiler()
+    report = profiler.run_benchmark(texts, engine=engine)
+
+    # Print human-readable report
+    print()
+    print(report.to_text())
+
+    # Save JSON if requested
+    if output_file:
+        path = Path(output_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps(report.to_json(), indent=2))
+        print(f"\nJSON report saved to {path}")
+
+
 def cmd_config() -> None:
     """Print current config values from TOML."""
     config = load_config()
@@ -411,14 +515,26 @@ def cmd_config() -> None:
         "normalization": config.normalization,
         "audio": config.audio,
     }
+    # Keys that should be masked when displayed
+    _SENSITIVE_KEYS = {"elevenlabs_api_key"}
     for section_name, section in sections.items():
         print(f"[{section_name}]")
         for key, value in vars(section).items():
-            print(f"  {key} = {value!r}")
+            if key in _SENSITIVE_KEYS and value:
+                # Mask API keys: show only last 4 chars
+                masked = "*" * (len(value) - 4) + value[-4:] if len(value) > 4 else "****"
+                print(f"  {key} = '{masked}'")
+            else:
+                print(f"  {key} = {value!r}")
         print()
 
 
 def main() -> None:
+    if len(sys.argv) >= 2 and sys.argv[1] == "check-permissions":
+        # check-permissions works on all platforms (reports N/A for macOS-only checks)
+        cmd_check_permissions()
+        return
+
     if platform.system() != "Darwin":
         print(
             "claude-speak currently requires macOS for audio output "
@@ -438,7 +554,6 @@ def main() -> None:
         "stop": cmd_stop,
         "kill-all": cmd_kill_all,
         "restart": cmd_restart,
-        "status": cmd_status,
         "voices": cmd_voices,
         "enable": cmd_enable,
         "disable": cmd_disable,
@@ -452,9 +567,14 @@ def main() -> None:
         "uninstall": cmd_uninstall,
         "listen": cmd_listen,
         "voice-input": cmd_voice_input,
+        "check-permissions": cmd_check_permissions,
+        "benchmark": cmd_benchmark,
     }
 
-    if cmd in handlers:
+    if cmd == "status":
+        show_mem = "--memory" in sys.argv[2:] or "-m" in sys.argv[2:]
+        cmd_status(show_memory=show_mem)
+    elif cmd in handlers:
         handlers[cmd]()
     elif cmd in ("test", "say"):
         text = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else "Hello, this is a test of claude speak."

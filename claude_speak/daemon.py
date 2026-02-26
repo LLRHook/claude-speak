@@ -20,6 +20,7 @@ from pathlib import Path
 from .audio_devices import get_device_manager
 from .config import Config, CONFIG_PATH, PID_FILE, TOGGLE_FILE, MUTE_FILE, PLAYING_FILE, LOG_FILE, QUEUE_DIR, load_config
 from .ipc import IPCServer
+from .memmon import get_monitor, init_monitor
 from .normalizer import normalize, chunk_text
 from .tts import TTSEngine, create_backend
 from .chimes import play_ready_chime, play_error_chime, play_stop_chime
@@ -274,6 +275,12 @@ def _create_ipc_server(
             return {"ok": False, "error": f"failed to list voices: {exc}"}
         return {"ok": True, "voices": voices}
 
+    def _handle_mem_stats(msg: dict) -> dict:
+        monitor = get_monitor()
+        stats = monitor.get_stats()
+        stats["ok"] = True
+        return stats
+
     server.register_handler("speak", _handle_speak)
     server.register_handler("stop", _handle_stop)
     server.register_handler("status", _handle_status)
@@ -284,6 +291,7 @@ def _create_ipc_server(
     server.register_handler("set_volume", _handle_set_volume)
     server.register_handler("queue_depth", _handle_queue_depth)
     server.register_handler("list_voices", _handle_list_voices)
+    server.register_handler("mem_stats", _handle_mem_stats)
     return server
 
 
@@ -470,6 +478,7 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
 
 def write_pid():
     PID_FILE.write_text(str(os.getpid()))
+    os.chmod(PID_FILE, 0o600)
 
 
 def read_pid() -> int | None:
@@ -494,6 +503,7 @@ def acquire_lock() -> bool:
         acquire_lock._fd = lock_fd
         lock_fd.write(str(os.getpid()))
         lock_fd.flush()
+        os.chmod(LOCK_FILE, 0o600)
         return True
     except (OSError, IOError):
         return False
@@ -584,6 +594,11 @@ def stop_daemon():
 
 def handle_shutdown(signum, frame):
     logger.info("Shutting down...")
+    # Stop memory monitor
+    try:
+        get_monitor().stop()
+    except Exception:
+        pass
     get_device_manager().stop_monitoring()
     PID_FILE.unlink(missing_ok=True)
     LOCK_FILE.unlink(missing_ok=True)
@@ -636,6 +651,11 @@ def _configure_logging(config: Config, foreground: bool = False):
     )
     file_handler.setFormatter(fmt)
     root.addHandler(file_handler)
+    # Restrict log file permissions (may contain runtime details)
+    try:
+        os.chmod(LOG_FILE, 0o600)
+    except OSError:
+        pass
 
     # StreamHandler for foreground (non-daemonized) mode
     if foreground:
@@ -689,9 +709,20 @@ def start(daemonize: bool = False):
 
     write_pid()
     START_TS_FILE.write_text(str(time.time()))
+    os.chmod(START_TS_FILE, 0o600)
     Q.ensure_queue_dir()
 
     config = load_config()
+
+    # Initialize memory monitor (tracemalloc enabled via env var)
+    tracemalloc_enabled = os.environ.get("CLAUDE_SPEAK_TRACEMALLOC", "") == "1"
+    monitor = init_monitor(enabled=tracemalloc_enabled)
+    monitor.start()
+    if tracemalloc_enabled:
+        logger.info("Memory monitor started with tracemalloc enabled.")
+    else:
+        logger.debug("Memory monitor started (tracemalloc disabled).")
+
     engine = TTSEngine(config)
     logger.info("Loading TTS engine (models will be auto-downloaded if missing)...")
     engine.load()

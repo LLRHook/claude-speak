@@ -96,20 +96,12 @@ if ! command -v jq &>/dev/null; then
   exit 0
 fi
 
-# Parse JSON input with jq — handle parse failures
-JQ_OUTPUT=""
-JQ_OUTPUT=$(echo "$INPUT" | jq -r '
-  "TRANSCRIPT_PATH=\(.transcript_path // "")",
-  "SESSION_ID=\(.session_id // "")",
-  "HOOK_EVENT=\(.hook_event_name // "")"
-' 2>/dev/null) || true
-
-if [[ -z "$JQ_OUTPUT" ]]; then
-  debug_log "jq failed to parse hook input"
-  exit 0
-fi
-
-eval "$JQ_OUTPUT" 2>/dev/null || { debug_log "eval of jq output failed"; exit 0; }
+# Parse JSON input with jq — extract each field separately to avoid eval
+# (eval of jq output was a shell injection vector if transcript content
+# contained shell metacharacters)
+TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // ""' 2>/dev/null) || true
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // ""' 2>/dev/null) || true
+HOOK_EVENT=$(echo "$INPUT" | jq -r '.hook_event_name // ""' 2>/dev/null) || true
 
 if [[ -z "$TRANSCRIPT_PATH" || ! -f "$TRANSCRIPT_PATH" ]]; then
   debug_log "Transcript path empty or file missing: '$TRANSCRIPT_PATH'"
@@ -182,11 +174,14 @@ mkdir -p "$QUEUE_DIR" 2>/dev/null || {
   debug_log "Failed to create queue directory: $QUEUE_DIR"
   exit 0
 }
+chmod 700 "$QUEUE_DIR" 2>/dev/null || true
 TIMESTAMP=$(perl -MTime::HiRes=time -e 'printf "%.6f\n", time()')
-echo "$CLEAN" > "$QUEUE_DIR/${TIMESTAMP}.txt" 2>/dev/null || {
-  debug_log "Failed to write queue file: $QUEUE_DIR/${TIMESTAMP}.txt"
+QUEUE_FILE="$QUEUE_DIR/${TIMESTAMP}.txt"
+echo "$CLEAN" > "$QUEUE_FILE" 2>/dev/null || {
+  debug_log "Failed to write queue file: $QUEUE_FILE"
   exit 0
 }
+chmod 600 "$QUEUE_FILE" 2>/dev/null || true
 
 # Signal daemon to process immediately (no poll delay)
 DAEMON_PID=$(cat /tmp/claude-speak-daemon.pid 2>/dev/null) || true
