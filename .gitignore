@@ -17,7 +17,9 @@ env/
 # Model files (too large for git)
 *.onnx
 *.bin
+*.npy
 models/
+train/features/
 
 # Runtime
 daemon.log
