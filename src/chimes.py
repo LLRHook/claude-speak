@@ -56,3 +56,21 @@ def play_stop_chime(device: int | None = None, volume: float = 0.3):
     sr = 24000
     samples = _generate_tone(261.63, 0.10, sr)  # C4
     _play(samples, volume, device, sr)
+
+
+def play_ack_chime(device: int | None = None, volume: float = 0.3):
+    """Spoken 'Got it' — voice input received, processing."""
+    import soundfile as sf
+    from pathlib import Path
+    ack_path = Path(__file__).resolve().parent / "assets" / "ack.wav"
+    if not ack_path.exists():
+        # Fallback to a quick tone if the asset is missing
+        sr = 24000
+        samples = _generate_tone(783.99, 0.08, sr)
+        _play(samples, volume, device, sr)
+        return
+    samples, sr = sf.read(str(ack_path), dtype="float32")
+    # Add 250ms silence tail so playback doesn't clip the end
+    tail = np.zeros(int(sr * 0.25), dtype=np.float32)
+    samples = np.concatenate([samples, tail])
+    _play(samples, volume, device, sr)

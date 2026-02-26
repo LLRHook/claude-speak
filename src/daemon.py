@@ -15,7 +15,7 @@ import sys
 import time
 from pathlib import Path
 
-from .config import Config, CONFIG_PATH, PID_FILE, TOGGLE_FILE, LOG_FILE, QUEUE_DIR, load_config
+from .config import Config, CONFIG_PATH, PID_FILE, TOGGLE_FILE, MUTE_FILE, PLAYING_FILE, LOG_FILE, QUEUE_DIR, load_config
 from .normalizer import normalize, chunk_text
 from .tts import TTSEngine
 from .chimes import play_ready_chime, play_error_chime, play_stop_chime
@@ -59,7 +59,13 @@ def _try_reload_config(config: Config, engine: TTSEngine, last_mtime: float) -> 
     return new_config, current_mtime
 
 
-async def run_loop(config: Config, engine: TTSEngine):
+async def _wait_for_unmute(poll: float = 0.2) -> None:
+    """Block until the mute file is removed."""
+    while MUTE_FILE.exists():
+        await asyncio.sleep(poll)
+
+
+async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
     """Main loop: watch queue, normalize, chunk, speak."""
     Q.ensure_queue_dir()
     print(f"[daemon] Watching queue: {QUEUE_DIR}", flush=True)
@@ -144,39 +150,62 @@ async def run_loop(config: Config, engine: TTSEngine):
             if PERF_LOG:
                 print(f"[perf] chunk: {(t_chunk - t_norm)*1000:.0f}ms ({len(chunks)} chunks)", flush=True)
 
-            if len(chunks) == 1:
-                # Single chunk — just stream directly
-                if TOGGLE_FILE.exists():
-                    await engine.speak(chunks[0])
+            # Mark as playing so VoiceController knows TTS is active
+            PLAYING_FILE.touch()
+            # Swap to built-in mic during TTS to avoid BT profile switching on AirPods
+            if voice_controller and voice_controller._wakeword_listener:
+                voice_controller._wakeword_listener.use_builtin_mic()
+
+            try:
+                if len(chunks) == 1:
+                    # Single chunk — stream directly (check mute before starting)
+                    if TOGGLE_FILE.exists() and not MUTE_FILE.exists():
+                        await engine.speak(chunks[0])
+                        if PERF_LOG:
+                            print(f"[perf] speak: {(time.monotonic() - t_chunk)*1000:.0f}ms", flush=True)
+                    elif MUTE_FILE.exists():
+                        # Muted — wait for unmute, then play
+                        print("[daemon] Muted, waiting to resume...", flush=True)
+                        await _wait_for_unmute()
+                        print("[daemon] Resumed.", flush=True)
+                        await engine.speak(chunks[0])
+                else:
+                    # Multiple chunks — generate next while current plays
+                    next_audio = await engine.generate_audio(chunks[0])
+                    t_gen = time.monotonic()
                     if PERF_LOG:
-                        print(f"[perf] speak: {(time.monotonic() - t_chunk)*1000:.0f}ms", flush=True)
-            else:
-                # Multiple chunks — generate next while current plays
-                # Generate first chunk
-                next_audio = await engine.generate_audio(chunks[0])
-                t_gen = time.monotonic()
-                if PERF_LOG:
-                    print(f"[perf] generate chunk[0]: {(t_gen - t_chunk)*1000:.0f}ms", flush=True)
+                        print(f"[perf] generate chunk[0]: {(t_gen - t_chunk)*1000:.0f}ms", flush=True)
 
-                for i in range(len(chunks)):
-                    if not TOGGLE_FILE.exists():
-                        break
+                    for i in range(len(chunks)):
+                        if not TOGGLE_FILE.exists():
+                            break
 
-                    current_audio = next_audio
+                        # Check mute before each chunk
+                        if MUTE_FILE.exists():
+                            engine.stop()
+                            print(f"[daemon] Muted at chunk {i}/{len(chunks)}, waiting...", flush=True)
+                            await _wait_for_unmute()
+                            print("[daemon] Resumed.", flush=True)
 
-                    if i + 1 < len(chunks):
-                        # TRUE parallel: play in thread (frees event loop)
-                        # so generate_audio can actually run concurrently
-                        gen_task = asyncio.create_task(engine.generate_audio(chunks[i + 1]))
-                        t_play = time.monotonic()
-                        await asyncio.to_thread(engine.play_audio, current_audio)
-                        if PERF_LOG:
-                            print(f"[perf] play chunk[{i}]: {(time.monotonic() - t_play)*1000:.0f}ms", flush=True)
-                        next_audio = await gen_task
-                        if PERF_LOG:
-                            print(f"[perf] generate chunk[{i+1}]: ready", flush=True)
-                    else:
-                        await asyncio.to_thread(engine.play_audio, current_audio)
+                        current_audio = next_audio
+
+                        if i + 1 < len(chunks):
+                            gen_task = asyncio.create_task(engine.generate_audio(chunks[i + 1]))
+                            t_play = time.monotonic()
+                            await asyncio.to_thread(engine.play_audio, current_audio)
+                            if PERF_LOG:
+                                print(f"[perf] play chunk[{i}]: {(time.monotonic() - t_play)*1000:.0f}ms", flush=True)
+                            next_audio = await gen_task
+                            if PERF_LOG:
+                                print(f"[perf] generate chunk[{i+1}]: ready", flush=True)
+                        else:
+                            await asyncio.to_thread(engine.play_audio, current_audio)
+            finally:
+                PLAYING_FILE.unlink(missing_ok=True)
+                MUTE_FILE.unlink(missing_ok=True)  # prevent mute deadlock if TTS finishes while muted
+                # Swap back to default mic after TTS finishes
+                if voice_controller and voice_controller._wakeword_listener:
+                    voice_controller._wakeword_listener.use_default_mic()
 
             t_done = time.monotonic()
             if PERF_LOG:
@@ -312,6 +341,8 @@ def handle_shutdown(signum, frame):
     PID_FILE.unlink(missing_ok=True)
     LOCK_FILE.unlink(missing_ok=True)
     START_TS_FILE.unlink(missing_ok=True)
+    MUTE_FILE.unlink(missing_ok=True)
+    PLAYING_FILE.unlink(missing_ok=True)
     sys.exit(0)
 
 
@@ -380,7 +411,7 @@ def start(daemonize: bool = False):
             print(f"[daemon] Voice controller failed to start: {e}", flush=True)
 
     try:
-        asyncio.run(run_loop(config, engine))
+        asyncio.run(run_loop(config, engine, voice_controller))
     except KeyboardInterrupt:
         if voice_controller:
             voice_controller.stop()

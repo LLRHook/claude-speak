@@ -2,8 +2,8 @@
 Wake word detection using openwakeword.
 
 Listens to the microphone for a wake word (default: "hey jarvis") and
-triggers a callback when detected. Also supports stop phrases that can
-silence/clear the TTS queue.
+triggers a callback when detected. Also supports a separate stop model
+(stop.onnx) for instant TTS interruption (~80ms latency).
 
 openwakeword is optional — if not installed, the listener degrades
 gracefully with a warning log message.
@@ -28,7 +28,6 @@ _DTYPE = "int16"
 
 
 def _openwakeword_available() -> bool:
-    """Check whether openwakeword is importable."""
     try:
         import openwakeword  # noqa: F401
         return True
@@ -37,7 +36,6 @@ def _openwakeword_available() -> bool:
 
 
 def _sounddevice_available() -> bool:
-    """Check whether sounddevice is importable."""
     try:
         import sounddevice  # noqa: F401
         return True
@@ -45,19 +43,30 @@ def _sounddevice_available() -> bool:
         return False
 
 
+def _find_builtin_mic() -> Optional[int]:
+    """Find the built-in microphone device index."""
+    try:
+        import sounddevice as sd
+        for i, d in enumerate(sd.query_devices()):
+            if d["max_input_channels"] > 0:
+                name = d["name"].lower()
+                # Match common built-in mic names across Mac models
+                if any(kw in name for kw in ("macbook", "built-in", "internal")):
+                    return i
+    except Exception:
+        pass
+    return None
+
+
 class WakeWordListener:
-    """Continuously listens to the microphone for wake words and stop phrases.
+    """Listens for wake words and stop commands via openwakeword models.
 
-    Usage::
+    Supports two models simultaneously:
+      - Wake word model (e.g., "hey_jarvis") -> fires wake callbacks
+      - Stop model (e.g., "stop.onnx") -> fires stop callbacks
 
-        listener = WakeWordListener(config)
-        listener.on_wake(lambda: print("Wake word detected!"))
-        listener.on_stop_phrase(lambda phrase: print(f"Stop: {phrase}"))
-        listener.start()
-        # ...later...
-        listener.stop()
-
-    The listener runs in a background thread and does not block.
+    During TTS playback, swaps to the built-in mic to avoid Bluetooth
+    profile switching on wireless headphones.
     """
 
     def __init__(self, config: Optional[WakeWordConfig] = None) -> None:
@@ -66,11 +75,15 @@ class WakeWordListener:
         self._stop_phrase_callbacks: list[Callable[[str], None]] = []
         self._thread: Optional[threading.Thread] = None
         self._running = False
+        self._paused = False  # True = mic closed (during voice input)
+        self._swap_mic = False  # True = use built-in mic (during TTS)
         self._model = None
-        self._stt_for_stop: Optional[object] = None  # reserved for future STT
+        self._stop_model_name: Optional[str] = None  # key in prediction dict
+        self._builtin_mic_id: Optional[int] = None
 
         # Cooldown to prevent rapid-fire detections
         self._last_wake_time: float = 0.0
+        self._last_stop_time: float = 0.0
         self._cooldown_seconds: float = 2.0
 
     # ------------------------------------------------------------------
@@ -78,47 +91,25 @@ class WakeWordListener:
     # ------------------------------------------------------------------
 
     def on_wake(self, callback: Callable[[], None]) -> None:
-        """Register a callback to be invoked when the wake word is detected."""
         self._wake_callbacks.append(callback)
 
     def on_stop_phrase(self, callback: Callable[[str], None]) -> None:
-        """Register a callback for stop-phrase detection.
-
-        The callback receives the matched stop phrase as its argument.
-        """
         self._stop_phrase_callbacks.append(callback)
 
     def start(self) -> bool:
-        """Start listening in a background thread.
-
-        Returns:
-            True if the listener started successfully, False if dependencies
-            are missing or it is already running.
-        """
         if self._running:
             logger.warning("WakeWordListener is already running")
             return False
 
         if not self._config.enabled:
-            logger.info("Wake word detection is disabled in config")
             return False
 
-        # Check dependencies
-        if not _openwakeword_available():
-            logger.warning(
-                "openwakeword is not installed — wake word detection disabled. "
-                "Install with: pip install openwakeword"
-            )
-            return False
-
-        if not _sounddevice_available():
-            logger.warning(
-                "sounddevice is not installed — wake word detection disabled. "
-                "Install with: pip install sounddevice"
-            )
+        if not _openwakeword_available() or not _sounddevice_available():
+            logger.warning("openwakeword or sounddevice not installed")
             return False
 
         self._running = True
+        self._paused = False
         self._thread = threading.Thread(
             target=self._listen_loop,
             name="wakeword-listener",
@@ -126,20 +117,38 @@ class WakeWordListener:
         )
         self._thread.start()
         logger.info(
-            "Wake word listener starting (model=%s, sensitivity=%.2f)",
+            "Wake word listener starting (model=%s, stop_model=%s, sensitivity=%.2f)",
             self._config.model,
+            self._config.stop_model or "none",
             self._config.sensitivity,
         )
         return True
 
     def stop(self) -> None:
-        """Stop the listener and release resources."""
         self._running = False
         if self._thread is not None:
             self._thread.join(timeout=3.0)
             self._thread = None
         self._model = None
         logger.info("Wake word listener stopped")
+
+    def pause(self) -> None:
+        """Pause mic input entirely (during voice input — Superwhisper needs the mic)."""
+        self._paused = True
+        logger.debug("Wake word listener paused")
+
+    def resume(self) -> None:
+        """Resume mic input after pause."""
+        self._paused = False
+        logger.debug("Wake word listener resumed")
+
+    def use_builtin_mic(self) -> None:
+        """Swap to built-in mic (during TTS to avoid BT profile switch)."""
+        self._swap_mic = True
+
+    def use_default_mic(self) -> None:
+        """Swap back to default mic (after TTS finishes)."""
+        self._swap_mic = False
 
     @property
     def is_running(self) -> bool:
@@ -150,20 +159,33 @@ class WakeWordListener:
     # ------------------------------------------------------------------
 
     def _load_model(self) -> bool:
-        """Load the openwakeword model. Returns True on success."""
         try:
             from openwakeword.model import Model as OWWModel
 
-            model_name = self._config.model
-            logger.info("Loading openwakeword model: %s", model_name)
+            models = [self._config.model]
 
-            # openwakeword can load bundled pre-trained models by name
-            # or custom .onnx files by path
+            # Add stop model if configured
+            if self._config.stop_model:
+                import os
+                stop_path = self._config.stop_model
+                # Resolve relative paths from project root
+                if not os.path.isabs(stop_path):
+                    from .config import PROJECT_DIR
+                    stop_path = str(PROJECT_DIR / stop_path)
+                if os.path.exists(stop_path):
+                    models.append(stop_path)
+                    # openwakeword uses the filename stem as the model key
+                    self._stop_model_name = os.path.splitext(os.path.basename(stop_path))[0]
+                    logger.info("Stop model loaded: %s (key=%s)", stop_path, self._stop_model_name)
+                else:
+                    logger.warning("Stop model not found: %s", stop_path)
+
+            logger.info("Loading openwakeword models: %s", models)
             self._model = OWWModel(
-                wakeword_models=[model_name],
+                wakeword_models=models,
                 inference_framework="onnx",
             )
-            logger.info("openwakeword model loaded successfully")
+            logger.info("Models loaded: %s", list(self._model.models.keys()))
             return True
 
         except Exception as e:
@@ -171,80 +193,89 @@ class WakeWordListener:
             return False
 
     def _listen_loop(self) -> None:
-        """Main microphone polling loop (runs in background thread).
-
-        Model loading happens here (not in start()) so the onnxruntime
-        session is created in the same thread that uses it — avoids
-        segfaults on macOS with daemon threads.
-        """
         import numpy as np
         import sounddevice as sd
 
-        logger.debug("Entering listen loop")
-
-        # Load model in this thread
         if not self._load_model():
             self._running = False
             return
 
+        self._builtin_mic_id = _find_builtin_mic()
+        if self._builtin_mic_id is not None:
+            logger.info("Built-in mic: device %d", self._builtin_mic_id)
+
         logger.info("Wake word listener ready")
 
         try:
-            with sd.InputStream(
-                samplerate=_SAMPLE_RATE,
-                channels=_CHANNELS,
-                dtype=_DTYPE,
-                blocksize=_CHUNK_SAMPLES,
-            ) as stream:
-                while self._running:
-                    audio_data, overflowed = stream.read(_CHUNK_SAMPLES)
-                    if overflowed:
-                        logger.debug("Audio input overflowed")
+            while self._running:
+                # Paused = mic fully released (voice input has the mic)
+                if self._paused:
+                    time.sleep(0.1)
+                    continue
 
-                    # audio_data shape: (chunk_samples, channels) as int16
-                    # openwakeword expects a 1-D int16 numpy array
-                    samples = np.squeeze(audio_data)
-                    self._process_audio(samples)
+                # Pick device
+                device = None
+                if self._swap_mic and self._builtin_mic_id is not None:
+                    device = self._builtin_mic_id
 
-        except sd.PortAudioError as e:
-            logger.error("Audio device error: %s", e)
-            self._running = False
+                try:
+                    with sd.InputStream(
+                        samplerate=_SAMPLE_RATE,
+                        channels=_CHANNELS,
+                        dtype=_DTYPE,
+                        blocksize=_CHUNK_SAMPLES,
+                        device=device,
+                    ) as stream:
+                        current_swap = self._swap_mic
+                        while (self._running
+                               and not self._paused
+                               and self._swap_mic == current_swap):
+                            audio_data, overflowed = stream.read(_CHUNK_SAMPLES)
+                            if overflowed:
+                                logger.debug("Audio input overflowed")
+                            samples = np.squeeze(audio_data)
+                            self._process_audio(samples)
+                except sd.PortAudioError as e:
+                    logger.error("Audio device error: %s (retrying in 1s)", e)
+                    time.sleep(1)
+
         except Exception as e:
             logger.error("Unexpected error in listen loop: %s", e)
             self._running = False
 
-        logger.debug("Exited listen loop")
-
     def _process_audio(self, samples) -> None:
-        """Run wake word and stop phrase detection on an audio chunk."""
         if self._model is None:
             return
 
-        # Feed audio to openwakeword
         prediction = self._model.predict(samples)
+        now = time.monotonic()
 
-        # Check each model's score against the sensitivity threshold
+        # Check stop model FIRST (priority over wake word)
+        if self._stop_model_name and self._stop_model_name in prediction:
+            score = prediction[self._stop_model_name]
+            if score >= self._config.stop_sensitivity:
+                if now - self._last_stop_time >= self._cooldown_seconds:
+                    self._last_stop_time = now
+                    self._last_wake_time = now  # suppress wake for this frame
+                    logger.info("Stop detected: %s (score=%.3f)", self._stop_model_name, score)
+                    self._model.reset()
+                    self._fire_stop_phrase_callbacks("stop")
+                    return  # stop wins — skip wake word check
+
+        # Check wake word models
         for model_name, score in prediction.items():
+            if model_name == self._stop_model_name:
+                continue  # already handled above
             if score >= self._config.sensitivity:
-                now = time.monotonic()
                 if now - self._last_wake_time < self._cooldown_seconds:
-                    logger.debug(
-                        "Wake word '%s' detected but in cooldown (%.1fs)",
-                        model_name,
-                        self._cooldown_seconds,
-                    )
                     continue
-
                 self._last_wake_time = now
-                logger.info(
-                    "Wake word detected: %s (score=%.3f)", model_name, score
-                )
-                # Reset model scores to prevent repeat triggers
+                logger.info("Wake word detected: %s (score=%.3f)", model_name, score)
                 self._model.reset()
                 self._fire_wake_callbacks()
+                return  # only one wake per frame
 
     def _fire_wake_callbacks(self) -> None:
-        """Invoke all registered wake-word callbacks."""
         for cb in self._wake_callbacks:
             try:
                 cb()
@@ -252,36 +283,8 @@ class WakeWordListener:
                 logger.error("Wake callback error: %s", e)
 
     def _fire_stop_phrase_callbacks(self, phrase: str) -> None:
-        """Invoke all registered stop-phrase callbacks."""
         for cb in self._stop_phrase_callbacks:
             try:
                 cb(phrase)
             except Exception as e:
                 logger.error("Stop phrase callback error: %s", e)
-
-    def check_stop_phrase(self, text: str) -> Optional[str]:
-        """Check transcribed text for stop phrases.
-
-        This is intended to be called externally with transcribed text
-        (e.g., from Superwhisper output or a separate STT pass) since
-        openwakeword handles wake words but not arbitrary phrase detection.
-
-        Args:
-            text: The transcribed text to check.
-
-        Returns:
-            The matched stop phrase, or None if no match.
-        """
-        if not text:
-            return None
-
-        text_lower = text.strip().lower()
-        for phrase in self._config.stop_phrases:
-            # Match if the stop phrase is the entire utterance or starts it
-            phrase_lower = phrase.lower()
-            if text_lower == phrase_lower or text_lower.startswith(phrase_lower):
-                logger.info("Stop phrase detected: '%s'", phrase)
-                self._fire_stop_phrase_callbacks(phrase)
-                return phrase
-
-        return None

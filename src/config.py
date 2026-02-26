@@ -14,25 +14,31 @@ WAKEWORD_DIR = PROJECT_DIR / "wakeword"
 QUEUE_DIR = Path("/tmp/claude-speak-queue")
 PID_FILE = Path("/tmp/claude-speak-daemon.pid")
 TOGGLE_FILE = Path.home() / ".claude-speak-enabled"
+MUTE_FILE = Path("/tmp/claude-speak-muted")
+PLAYING_FILE = Path("/tmp/claude-speak-playing")
 LOG_FILE = PROJECT_DIR / "daemon.log"
 
 
 @dataclass
 class TTSConfig:
-    voice: str = "af_sarah"
+    voice: str = "af_sarah"  # single voice name or blend like "bm_george:60+bm_fable:40"
     speed: float = 1.0
+    lang: str = "en-us"  # language code for Kokoro (en-us, en-gb, etc.)
     device: str = "auto"
     model_path: str = str(MODELS_DIR / "kokoro-v1.0.onnx")
     voices_path: str = str(MODELS_DIR / "voices-v1.0.bin")
     max_chunk_chars: int = 400  # split text into chunks of this size
+    volume: float = 1.0  # TTS speech volume (0.0-1.0)
 
 
 @dataclass
 class WakeWordConfig:
     enabled: bool = False
     engine: str = "openwakeword"
-    model: str = "hey_jarvis"  # pre-trained, swap to custom later
+    model: str = "hey_jarvis"  # pre-trained wake word model
+    stop_model: str = ""  # path to stop.onnx for instant stop detection
     sensitivity: float = 0.5
+    stop_sensitivity: float = 0.5  # separate threshold for stop model
     stop_phrases: list = field(default_factory=lambda: ["stop", "quiet", "shut up"])
 
 

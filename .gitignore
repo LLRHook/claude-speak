@@ -26,6 +26,9 @@ daemon.log
 # User config (use claude-speak.toml.example as template)
 claude-speak.toml
 
+# Private notes
+DEMO-SCRIPT.md
+
 # IDE
 .idea/
 .vscode/

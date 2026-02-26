@@ -196,7 +196,7 @@ def wait_for_transcription(
 
 def _wait_for_speech_then_silence(
     silence_duration: float = 3.0,
-    speech_threshold: float = 60.0,
+    speech_threshold: float = 80.0,
     timeout: float = 300.0,
 ) -> bool:
     """Monitor the microphone and detect speech followed by silence.

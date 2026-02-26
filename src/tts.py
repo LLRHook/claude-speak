@@ -5,6 +5,7 @@ Pre-generates upcoming chunks to eliminate dead air between sentences.
 """
 
 import os
+import threading
 import time
 import numpy as np
 from pathlib import Path
@@ -26,9 +27,12 @@ class TTSEngine:
         self._stream = None
         self._sample_rate = None
         self._last_device_resolve = 0.0
+        self._stream_lock = threading.Lock()  # protects _stream creation/destruction
+        self._stopped = threading.Event()  # signals _write_samples to bail immediately
+        self._voice_style = None  # resolved in load() — string or numpy blend array
 
     def load(self):
-        """Load model and resolve audio device."""
+        """Load model, resolve voice (with optional blending), and audio device."""
         from kokoro_onnx import Kokoro
 
         model_path = self.config.tts.model_path
@@ -36,13 +40,55 @@ class TTSEngine:
 
         print(f"[tts] Loading model from {Path(model_path).name}...", flush=True)
         self.kokoro = Kokoro(model_path, voices_path)
+        self._voice_style = self._resolve_voice()
         self._resolve_device()
         print(
             f"[tts] Ready. Voice: {self.config.tts.voice}, "
+            f"Lang: {self.config.tts.lang}, "
             f"Speed: {self.config.tts.speed}, "
             f"Device: {self._device_name()}",
             flush=True,
         )
+
+    def _resolve_voice(self):
+        """Parse voice config — single name or blend like 'bm_george:60+bm_fable:40'.
+
+        Returns either a string (single voice) or a numpy array (blended style).
+        """
+        voice_str = self.config.tts.voice
+        if "+" not in voice_str:
+            return voice_str
+
+        # Parse blend: "bm_george:60+bm_fable:40"
+        blend = None
+        parts = []
+        for part in voice_str.split("+"):
+            part = part.strip()
+            if ":" in part:
+                name, weight = part.rsplit(":", 1)
+                weight = float(weight) / 100.0
+            else:
+                name = part
+                weight = None  # will be set to equal share later
+            parts.append((name.strip(), weight))
+
+        # Fill in equal weights for parts without explicit weight
+        unweighted = [p for p in parts if p[1] is None]
+        if unweighted:
+            remaining = 1.0 - sum(w for _, w in parts if w is not None)
+            equal_share = remaining / len(unweighted)
+            parts = [(n, w if w is not None else equal_share) for n, w in parts]
+
+        for name, weight in parts:
+            style = self.kokoro.get_voice_style(name)
+            if blend is None:
+                blend = style * weight
+            else:
+                blend = np.add(blend, style * weight)
+
+        names = " + ".join(f"{n} ({w*100:.0f}%)" for n, w in parts)
+        print(f"[tts] Voice blend: {names}", flush=True)
+        return blend
 
     def _resolve_device(self):
         """Pick the output audio device."""
@@ -75,39 +121,63 @@ class TTSEngine:
         """Create or reuse a persistent output stream for gapless playback."""
         import sounddevice as sd
 
-        # Reuse if device and sample rate haven't changed
-        if (self._stream is not None
-                and self._stream.active
-                and self._sample_rate == sample_rate):
-            return
+        with self._stream_lock:
+            # Reuse if device and sample rate haven't changed
+            if (self._stream is not None
+                    and self._stream.active
+                    and self._sample_rate == sample_rate):
+                self._stopped.clear()
+                return
 
-        # Close old stream
-        if self._stream is not None:
-            try:
-                self._stream.close()
-            except Exception:
-                pass
+            # Close old stream
+            if self._stream is not None:
+                try:
+                    self._stream.close()
+                except Exception:
+                    pass
 
-        self._sample_rate = sample_rate
-        self._stream = sd.OutputStream(
-            samplerate=sample_rate,
-            channels=1,
-            dtype="float32",
-            device=self._output_device,
-            blocksize=0,  # let sounddevice pick optimal size
-        )
-        self._stream.start()
+            self._stopped.clear()
+            self._sample_rate = sample_rate
+            self._stream = sd.OutputStream(
+                samplerate=sample_rate,
+                channels=1,
+                dtype="float32",
+                device=self._output_device,
+                blocksize=0,  # let sounddevice pick optimal size
+            )
+            self._stream.start()
 
     def _write_samples(self, samples: np.ndarray):
-        """Write audio samples to the persistent stream. Blocks until done."""
+        """Write audio samples to the persistent stream.
+
+        Lock is held only briefly to grab the stream ref. The actual
+        blocking write() happens outside the lock so stop() can abort
+        the stream instantly without waiting for the write to finish.
+        """
+        vol = self.config.tts.volume
+        if vol < 1.0:
+            samples = samples * vol
         if samples.ndim == 1:
             samples = samples.reshape(-1, 1)
-        # Write in chunks to keep the stream fed smoothly
         chunk_size = 4096
         offset = 0
         while offset < len(samples):
+            if self._stopped.is_set():
+                break
+            # Grab stream ref under lock (fast)
+            with self._stream_lock:
+                stream = self._stream
+            if stream is None:
+                break
             end = min(offset + chunk_size, len(samples))
-            self._stream.write(samples[offset:end])
+            try:
+                stream.write(samples[offset:end])
+            except Exception:
+                # Stream was aborted by stop() or device error — clean up
+                with self._stream_lock:
+                    if self._stream is stream:  # only if nobody else replaced it
+                        self._stream = None
+                break
             offset = end
 
     def _maybe_resolve_device(self):
@@ -125,9 +195,9 @@ class TTSEngine:
         result = []
         stream = self.kokoro.create_stream(
             text,
-            voice=self.config.tts.voice,
+            voice=self._voice_style,
             speed=self.config.tts.speed,
-            lang="en-us",
+            lang=self.config.tts.lang,
         )
         async for samples, sample_rate in stream:
             result.append((samples, sample_rate))
@@ -150,9 +220,9 @@ class TTSEngine:
         t0 = time.monotonic()
         stream = self.kokoro.create_stream(
             text,
-            voice=self.config.tts.voice,
+            voice=self._voice_style,
             speed=self.config.tts.speed,
-            lang="en-us",
+            lang=self.config.tts.lang,
         )
 
         first = True
@@ -164,26 +234,22 @@ class TTSEngine:
             self._ensure_stream(sample_rate)
             self._write_samples(samples)
 
-    def drain(self):
-        """Wait for all buffered audio to finish playing."""
-        if self._stream is not None and self._stream.active:
-            import time
-            # Write a small silence buffer to flush the stream
-            silence = np.zeros((self._sample_rate or 24000, 1), dtype="float32")
-            try:
-                self._stream.write(silence[:1024])
-            except Exception:
-                pass
-
     def stop(self):
-        """Stop playback immediately."""
-        if self._stream is not None:
-            try:
-                self._stream.abort()
-                self._stream.close()
-            except Exception:
-                pass
-            self._stream = None
+        """Stop playback immediately (thread-safe).
+
+        Sets _stopped event first (instant, no lock needed) so _write_samples
+        bails between chunks. Then acquires lock to abort the PortAudio stream,
+        which also interrupts any in-progress write() call.
+        """
+        self._stopped.set()
+        with self._stream_lock:
+            if self._stream is not None:
+                try:
+                    self._stream.abort()
+                    self._stream.close()
+                except Exception:
+                    pass
+                self._stream = None
 
     def list_voices(self) -> list[str]:
         if not self.kokoro:

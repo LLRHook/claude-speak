@@ -10,9 +10,28 @@ QUEUE_DIR="/tmp/claude-speak-queue"
 POS_FILE="/tmp/claude-speak-pos"
 PERF_LOG="/tmp/claude-speak-perf.log"
 PERF_ENABLED="${CLAUDE_SPEAK_PERF:-}"
+HOOK_LOCK="/tmp/claude-speak-hook.lock"
 
 # --- Gate ---
 [[ ! -f "$TOGGLE_FILE" ]] && exit 0
+
+# --- Serialize: prevent parallel hook instances from reading the same position ---
+# mkdir is atomic on all POSIX systems — perfect for macOS which lacks flock
+# Remove stale locks older than 10 seconds (crashed hook)
+if [[ -d "$HOOK_LOCK" ]]; then
+  _lock_age=$(( $(date +%s) - $(stat -f%m "$HOOK_LOCK" 2>/dev/null || echo 0) ))
+  [[ $_lock_age -gt 10 ]] && rmdir "$HOOK_LOCK" 2>/dev/null
+fi
+_lock_acquired=0
+for _i in $(seq 1 30); do  # wait up to 3 seconds (30 x 0.1s)
+  if mkdir "$HOOK_LOCK" 2>/dev/null; then
+    _lock_acquired=1
+    trap 'rmdir "$HOOK_LOCK" 2>/dev/null' EXIT
+    break
+  fi
+  sleep 0.1
+done
+[[ $_lock_acquired -eq 0 ]] && exit 0  # give up if still locked
 
 [[ -n "$PERF_ENABLED" ]] && T_START=$(perl -MTime::HiRes=time -e 'printf "%.3f\n", time()')
 
