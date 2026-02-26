@@ -54,6 +54,7 @@ claude-speak is a functional personal voice interface for Claude Code, running a
 | `pgrep` in `kill_all()` may match unrelated processes containing "claude-speak" | Low | PID file check runs first; pgrep is fallback |
 | Queue race condition: two dequeue calls could read same file if perfectly simultaneous | Very Low | File-based queue with unlink; FileNotFoundError caught |
 | Voice input RMS threshold (80.0) is hardcoded, not calibrated per environment | Medium | Works in quiet environments; noisy environments may false-trigger |
+| Hook scripts resolve `$0` to symlink path instead of target, so `$PROJECT` points to `~/.claude/` instead of the real project directory — `cli.py` not found | High | Fixed: hooks now use `BASH_SOURCE[0]` + `readlink` to follow symlinks before deriving `$PROJECT`; also corrected `cli.py` path to `claude_speak/cli.py` |
 
 ### Architecture Diagram
 
