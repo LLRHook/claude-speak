@@ -15,7 +15,7 @@ import logging
 import threading
 from typing import Optional
 
-from .config import Config, load_config, MUTE_FILE, PLAYING_FILE
+from .config import Config, VoiceCommandsConfig, load_config, MUTE_FILE, PLAYING_FILE
 from .voice_input import voice_input_cycle, builtin_voice_input_cycle, SuperwhisperError
 from .wakeword import WakeWordListener
 from .chimes import play_ack_chime, play_error_chime
@@ -88,9 +88,11 @@ class VoiceController:
         self,
         config: Optional[Config] = None,
         tts_stop_callback: Optional[callable] = None,
+        voice_command_callback: Optional[callable] = None,
     ) -> None:
         self._config = config or load_config()
         self._tts_stop_callback = tts_stop_callback
+        self._voice_command_callback = voice_command_callback
 
         self._wakeword_listener: Optional[WakeWordListener] = None
         self._running = False
@@ -134,6 +136,76 @@ class VoiceController:
 
     def trigger_voice_input(self) -> bool:
         return self._handle_wake()
+
+    # ------------------------------------------------------------------
+    # Voice command handling
+    # ------------------------------------------------------------------
+
+    def match_voice_command(self, text: str) -> Optional[str]:
+        """Check if *text* matches a configured voice command.
+
+        Returns the command action name (e.g. "pause", "louder") or None.
+        Matching is case-insensitive on the stripped text.
+        Disabled commands (empty string in config) are skipped.
+        """
+        stripped = text.strip().lower()
+        vc = self._config.voice_commands
+        for action in ("pause", "resume", "repeat", "louder", "quieter", "faster", "slower", "stop"):
+            word = getattr(vc, action, "")
+            if word and stripped == word.lower():
+                return action
+        return None
+
+    def handle_voice_command(self, command: str) -> bool:
+        """Dispatch a recognized voice command.
+
+        For "stop", delegates to handle_stop.
+        For "pause"/"resume", manages mute state directly.
+        For other commands (repeat, louder, quieter, faster, slower),
+        delegates to the voice_command_callback registered by the daemon.
+
+        Returns True if the command was handled.
+        """
+        if command == "stop":
+            self.handle_stop("stop")
+            return True
+
+        if command == "pause":
+            logger.info("Voice command: pause")
+            try:
+                MUTE_FILE.touch()
+            except OSError as e:
+                logger.warning("Failed to create mute sentinel: %s", e)
+            if self._tts_stop_callback is not None:
+                try:
+                    self._tts_stop_callback()
+                except Exception as e:
+                    logger.error("Error stopping TTS for pause: %s", e)
+            return True
+
+        if command == "resume":
+            logger.info("Voice command: resume")
+            try:
+                MUTE_FILE.unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning("Failed to remove mute sentinel: %s", e)
+            return True
+
+        # Delegate remaining commands to the daemon callback
+        if command in ("repeat", "louder", "quieter", "faster", "slower"):
+            logger.info("Voice command: %s", command)
+            if self._voice_command_callback is not None:
+                try:
+                    self._voice_command_callback(command)
+                except Exception as e:
+                    logger.error("Error in voice command callback: %s", e)
+                return True
+            else:
+                logger.warning("No voice command callback registered for '%s'", command)
+                return False
+
+        logger.warning("Unknown voice command: '%s'", command)
+        return False
 
     # ------------------------------------------------------------------
     # Stop-phrase handling
