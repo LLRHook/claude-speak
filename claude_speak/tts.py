@@ -195,15 +195,19 @@ class TTSEngine:
             self._stopped.clear()
             self._sample_rate = sample_rate
 
-            # Retry with exponential backoff on PortAudio errors
+            # Retry with exponential backoff on PortAudio errors.
+            # Re-resolve device on each retry so we pick up newly connected or
+            # default devices after a disconnection (e.g. AirPods closed).
             delays = [0.1, 0.5, 1.0]
             last_err = None
             for attempt in range(len(delays) + 1):
+                if attempt > 0:
+                    self._resolve_device()
                 device = self._output_device
                 # On final retry, fall back to default device
-                if attempt == len(delays) and device != sd.default.device[1]:
+                if attempt == len(delays):
                     device = sd.default.device[1]
-                    logger.warning("Falling back to default output device")
+                    logger.warning("Falling back to default output device (device %s)", device)
                 try:
                     self._stream = sd.OutputStream(
                         samplerate=sample_rate,
@@ -213,6 +217,8 @@ class TTSEngine:
                         blocksize=0,  # let sounddevice pick optimal size
                     )
                     self._stream.start()
+                    if attempt > 0:
+                        logger.info("Audio stream recovered on device: %s", self._device_name())
                     return
                 except sd.PortAudioError as e:
                     last_err = e
@@ -254,10 +260,21 @@ class TTSEngine:
             end = min(offset + chunk_size, len(samples))
             try:
                 stream.write(samples[offset:end])
-            except Exception:
-                # Stream was aborted by stop() or device error — clean up
+            except sd.PortAudioError as e:
+                logger.warning("Audio device error during playback: %s", e)
                 with self._stream_lock:
-                    if self._stream is stream:  # only if nobody else replaced it
+                    if self._stream is stream:
+                        try:
+                            self._stream.close()
+                        except Exception:
+                            pass
+                        self._stream = None
+                self._resolve_device()
+                break
+            except Exception:
+                # Stream was aborted by stop() — clean up
+                with self._stream_lock:
+                    if self._stream is stream:
                         self._stream = None
                 break
             offset = end

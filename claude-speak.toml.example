@@ -43,9 +43,11 @@ sensitivity = 0.5
 stop_phrases = ["stop", "quiet", "shut up"]
 
 [input]
-# Use SuperWhisper for voice-to-text transcription.
-# When true, voice input is routed through the SuperWhisper app (must be installed).
-superwhisper = true
+# Voice input backend to use.
+#   "builtin"      — always use the built-in mic -> VAD -> STT pipeline (default)
+#   "superwhisper" — always use the Superwhisper app (must be installed)
+#   "auto"         — use Superwhisper if it is running, otherwise fall back to built-in
+backend = "builtin"
 
 # Automatically submit transcribed text to Claude without waiting for confirmation.
 auto_submit = true

@@ -49,6 +49,24 @@ MODEL_REGISTRY: dict[str, ModelInfo] = {
         sha256="",
         size_bytes=341_583_872,  # ~326 MB
     ),
+    "silero_vad.onnx": ModelInfo(
+        name="silero_vad.onnx",
+        filename="silero_vad.onnx",
+        url="https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx",
+        sha256="",  # skip verification
+        size_bytes=0,  # skip size check — small model (~2 MB), size may change between versions
+    ),
+}
+
+# ---------------------------------------------------------------------------
+# STT (Whisper) model registry
+# ---------------------------------------------------------------------------
+
+STT_MODEL_REGISTRY: dict[str, dict[str, str]] = {
+    "tiny": {"hf_repo": "mlx-community/whisper-tiny", "size_hint": "~39 MB"},
+    "base": {"hf_repo": "mlx-community/whisper-base", "size_hint": "~74 MB"},
+    "small": {"hf_repo": "mlx-community/whisper-small", "size_hint": "~244 MB"},
+    "medium": {"hf_repo": "mlx-community/whisper-medium", "size_hint": "~769 MB"},
 }
 
 # ---------------------------------------------------------------------------
@@ -153,3 +171,53 @@ def get_model_path(name: str, dest_dir: Path | None = None) -> Path:
     if name in MODEL_REGISTRY:
         return dest_dir / MODEL_REGISTRY[name].filename
     return dest_dir / name
+
+
+def list_stt_models() -> dict[str, dict[str, str]]:
+    """Return the STT model registry."""
+    return STT_MODEL_REGISTRY
+
+
+def ensure_stt_model(model_size: str = "base") -> str:
+    """Return the HF repo ID for *model_size*, optionally pre-downloading it.
+
+    mlx-whisper handles the actual download from Hugging Face on first use.
+    This function optionally triggers that download early by running a silent
+    transcription if mlx_whisper is available.
+
+    Args:
+        model_size: One of the keys in :data:`STT_MODEL_REGISTRY` (e.g. "base").
+
+    Returns:
+        The Hugging Face repo ID string (e.g. "mlx-community/whisper-base").
+    """
+    if model_size not in STT_MODEL_REGISTRY:
+        raise ValueError(
+            f"Unknown STT model size {model_size!r}. "
+            f"Choose from: {list(STT_MODEL_REGISTRY)}"
+        )
+
+    hf_repo = STT_MODEL_REGISTRY[model_size]["hf_repo"]
+
+    try:
+        import mlx_whisper  # noqa: F401
+    except ImportError:
+        log.warning(
+            "mlx_whisper is not installed; skipping STT model pre-download. "
+            "Install it with: pip install mlx-whisper"
+        )
+        return hf_repo
+
+    log.info("Pre-downloading STT model %s from %s ...", model_size, hf_repo)
+    try:
+        import numpy as np
+
+        # A 0.1-second silent clip is enough to trigger the model download
+        # without doing any real work.
+        silent_audio = np.zeros(int(0.1 * 16000), dtype=np.float32)
+        mlx_whisper.transcribe(silent_audio, path_or_hf_repo=hf_repo, language="en")
+        log.info("STT model %s ready.", model_size)
+    except Exception as exc:
+        log.warning("STT model pre-download encountered an error: %s", exc)
+
+    return hf_repo

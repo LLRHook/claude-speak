@@ -16,7 +16,7 @@ import threading
 from typing import Optional
 
 from .config import Config, load_config, MUTE_FILE, PLAYING_FILE
-from .voice_input import voice_input_cycle, SuperwhisperError
+from .voice_input import voice_input_cycle, builtin_voice_input_cycle, SuperwhisperError
 from .wakeword import WakeWordListener
 from .chimes import play_ack_chime, play_error_chime
 from . import queue as Q
@@ -217,11 +217,31 @@ class VoiceController:
         )
         thread.start()
 
+    def _choose_voice_input(self) -> str:
+        """Decide which voice input flow to use.
+
+        Returns:
+            "superwhisper" to use the external Superwhisper app, or
+            "builtin" to use the built-in mic -> VAD -> STT pipeline.
+        """
+        backend = self._config.input.backend
+        if backend == "superwhisper":
+            return "superwhisper"
+        if backend == "auto":
+            from .voice_input import _is_superwhisper_running
+            if _is_superwhisper_running():
+                return "superwhisper"
+            return "builtin"
+        return "builtin"  # default
+
     def _handle_wake(self) -> bool:
         """Execute the full voice input cycle.
 
         Pauses (not stops) the wake word listener during recording to
-        release the mic for Superwhisper, then resumes it after.
+        release the mic, then resumes it after.
+
+        Chooses between the built-in pipeline and the legacy Superwhisper
+        flow based on config and whether Superwhisper is running.
         """
         if not self._input_lock.acquire(blocking=False):
             logger.debug("Voice input lock held, skipping")
@@ -235,7 +255,13 @@ class VoiceController:
             if self._wakeword_listener and self._wakeword_listener.is_running:
                 self._wakeword_listener.pause()
 
-            success = voice_input_cycle(config=self._config.input)
+            flow = self._choose_voice_input()
+            logger.info("Using %s voice input flow", flow)
+
+            if flow == "superwhisper":
+                success = voice_input_cycle(config=self._config.input)
+            else:
+                success = builtin_voice_input_cycle(config=self._config.input)
 
             if success:
                 logger.info("Voice input cycle completed")

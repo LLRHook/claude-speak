@@ -9,7 +9,8 @@ Usage:
     claude-speak restart        # Restart daemon
     claude-speak test "text"    # Speak text immediately (no daemon needed)
     claude-speak say "text"     # Alias for test
-    claude-speak voices         # List available voices
+    claude-speak voices         # List available TTS voices
+    claude-speak stt-models     # List available Whisper STT models
     claude-speak enable         # Enable voice output
     claude-speak disable        # Disable voice output (daemon stays loaded)
     claude-speak clear          # Clear the TTS queue
@@ -193,6 +194,16 @@ def cmd_voice_input() -> None:
         print("Voice input failed or timed out.")
 
 
+def cmd_stt_models() -> None:
+    """List available Whisper STT models and their sizes."""
+    from .models import list_stt_models
+
+    registry = list_stt_models()
+    print(f"Available STT models ({len(registry)}):")
+    for size, info in registry.items():
+        print(f"  {size:8s}  {info['hf_repo']}  ({info['size_hint']})")
+
+
 def cmd_setup() -> None:
     """Run first-time setup."""
     from .setup import run_setup
@@ -251,6 +262,7 @@ def main() -> None:
         "clear": cmd_clear,
         "log": cmd_log,
         "config": cmd_config,
+        "stt-models": cmd_stt_models,
         "setup": cmd_setup,
         "uninstall": cmd_uninstall,
         "listen": cmd_listen,
