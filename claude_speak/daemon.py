@@ -20,7 +20,7 @@ from pathlib import Path
 from .audio_devices import get_device_manager
 from .config import Config, CONFIG_PATH, PID_FILE, TOGGLE_FILE, MUTE_FILE, PLAYING_FILE, LOG_FILE, QUEUE_DIR, load_config
 from .normalizer import normalize, chunk_text
-from .tts import TTSEngine
+from .tts import TTSEngine, create_backend
 from .chimes import play_ready_chime, play_error_chime, play_stop_chime
 from . import queue as Q
 
@@ -39,6 +39,98 @@ def _is_stop_command(text: str, stop_phrases: list[str]) -> bool:
     return stripped in [p.lower() for p in stop_phrases]
 
 
+# ---------------------------------------------------------------------------
+# Voice command state (module-level so run_loop and helpers share it)
+# ---------------------------------------------------------------------------
+
+_last_spoken_text: str | None = None
+
+
+def _match_voice_command(text: str, config: Config) -> str | None:
+    """Check if *text* matches a configured voice command.
+
+    Returns the command name (e.g. "pause", "louder") or None.
+    Matching is case-insensitive on the stripped text.
+    Disabled commands (empty string) are skipped.
+    """
+    stripped = text.strip().lower()
+    vc = config.voice_commands
+    # Build mapping: command_word -> action_name
+    mapping: dict[str, str] = {}
+    for action in ("pause", "resume", "repeat", "louder", "quieter", "faster", "slower", "stop"):
+        word = getattr(vc, action, "")
+        if word:  # empty string = disabled
+            mapping[word.lower()] = action
+    return mapping.get(stripped)
+
+
+def _handle_voice_command(
+    command: str,
+    config: Config,
+    engine: TTSEngine,
+    voice_controller=None,
+) -> bool:
+    """Execute a voice command. Returns True if handled.
+
+    Side effects:
+      - pause/resume: toggles _paused flag and mute sentinel
+      - repeat: re-enqueues _last_spoken_text
+      - louder/quieter: adjusts config.tts.volume (persists across messages)
+      - faster/slower: adjusts config.tts.speed (persists across messages)
+      - stop: delegates to engine.stop() + queue clear
+    """
+    if command == "pause":
+        MUTE_FILE.touch()
+        engine.stop()
+        logger.info("Voice command: pause — TTS muted")
+        return True
+
+    if command == "resume":
+        MUTE_FILE.unlink(missing_ok=True)
+        logger.info("Voice command: resume — TTS unmuted")
+        return True
+
+    if command == "repeat":
+        if _last_spoken_text:
+            Q.enqueue(_last_spoken_text)
+            logger.info("Voice command: repeat — re-enqueued last message (%d chars)", len(_last_spoken_text))
+        else:
+            logger.info("Voice command: repeat — no previous message to repeat")
+        return True
+
+    if command == "louder":
+        old = config.tts.volume
+        config.tts.volume = min(1.0, round(old + 0.1, 2))
+        logger.info("Voice command: louder — volume %.2f -> %.2f", old, config.tts.volume)
+        return True
+
+    if command == "quieter":
+        old = config.tts.volume
+        config.tts.volume = max(0.1, round(old - 0.1, 2))
+        logger.info("Voice command: quieter — volume %.2f -> %.2f", old, config.tts.volume)
+        return True
+
+    if command == "faster":
+        old = config.tts.speed
+        config.tts.speed = round(old + 0.1, 2)
+        logger.info("Voice command: faster — speed %.2f -> %.2f", old, config.tts.speed)
+        return True
+
+    if command == "slower":
+        old = config.tts.speed
+        config.tts.speed = max(0.1, round(old - 0.1, 2))
+        logger.info("Voice command: slower — speed %.2f -> %.2f", old, config.tts.speed)
+        return True
+
+    if command == "stop":
+        engine.stop()
+        Q.clear()
+        logger.info("Voice command: stop — playback stopped and queue cleared")
+        return True
+
+    return False
+
+
 def _try_reload_config(config: Config, engine: TTSEngine, last_mtime: float) -> tuple[Config, float]:
     """Check config file mtime and hot-reload if changed. Returns (config, mtime)."""
     try:
@@ -52,12 +144,34 @@ def _try_reload_config(config: Config, engine: TTSEngine, last_mtime: float) -> 
     logger.info("Config file changed, reloading...")
     new_config = load_config()
 
+    # Detect engine change and hot-swap backend
+    old_engine_name = config.tts.engine
+    new_engine_name = new_config.tts.engine
+    if old_engine_name != new_engine_name:
+        logger.info(
+            "TTS engine changed: %s → %s, swapping backend...",
+            old_engine_name, new_engine_name,
+        )
+        try:
+            new_backend = create_backend(new_engine_name, new_config)
+            new_backend.load()
+            engine.swap_backend(new_backend)
+            logger.info("Engine swap complete: now using %s", new_engine_name)
+        except Exception as exc:
+            logger.error(
+                "Failed to swap to engine %s: %s — keeping %s",
+                new_engine_name, exc, old_engine_name,
+            )
+            # Revert engine name in config so next reload doesn't retry
+            new_config.tts.engine = old_engine_name
+
     # Update engine settings
     engine.config = new_config
     engine._resolve_device()
     logger.info(
-        "Reloaded config — voice=%s, speed=%s, device=%s",
+        "Reloaded config — voice=%s, speed=%s, device=%s, engine=%s",
         new_config.tts.voice, new_config.tts.speed, new_config.tts.device,
+        new_config.tts.engine,
     )
     return new_config, current_mtime
 
@@ -130,6 +244,16 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
             pass
 
         t0 = time.monotonic()
+
+        # Voice command handling: check before stop-phrase handling so that
+        # voice commands like "pause" and "repeat" take priority when both
+        # systems could match.
+        voice_cmd = _match_voice_command(text, config)
+        if voice_cmd is not None:
+            _handle_voice_command(voice_cmd, config, engine, voice_controller)
+            if voice_cmd == "stop" and config.audio.chimes:
+                play_stop_chime(device=engine._output_device, volume=config.audio.volume)
+            continue
 
         # Stop word handling: if text is only a stop phrase, abort playback
         if _is_stop_command(text, config.wakeword.stop_phrases):
@@ -215,6 +339,10 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
                 if voice_controller and voice_controller._wakeword_listener:
                     if not voice_controller.bt_workaround_active:
                         voice_controller._wakeword_listener.use_default_mic()
+
+            # Store the original text for "repeat" command
+            global _last_spoken_text
+            _last_spoken_text = text
 
             t_done = time.monotonic()
             logger.debug("TOTAL dequeue->done: %.0fms", (t_done - t0) * 1000)
@@ -480,9 +608,96 @@ def start(daemonize: bool = False):
         except Exception as e:
             logger.error("Voice controller failed to start: %s", e)
 
+    # Start media key handler if enabled in config
+    media_key_handler = None
+    if config.audio.media_keys_enabled:
+        try:
+            from .media_keys import MediaKeyHandler
+
+            def _toggle_mute():
+                if MUTE_FILE.exists():
+                    MUTE_FILE.unlink(missing_ok=True)
+                    logger.info("Media key: TTS unmuted")
+                else:
+                    MUTE_FILE.touch()
+                    engine.stop()
+                    logger.info("Media key: TTS muted")
+
+            def _volume_up():
+                old = config.tts.volume
+                config.tts.volume = min(1.0, round(old + 0.1, 2))
+                logger.info("Media key: volume up %.2f -> %.2f", old, config.tts.volume)
+
+            def _volume_down():
+                old = config.tts.volume
+                config.tts.volume = max(0.1, round(old - 0.1, 2))
+                logger.info("Media key: volume down %.2f -> %.2f", old, config.tts.volume)
+
+            media_key_handler = MediaKeyHandler({
+                "toggle_mute": _toggle_mute,
+                "volume_up": _volume_up,
+                "volume_down": _volume_down,
+            })
+            if media_key_handler.start():
+                logger.info("Media key handler started.")
+            else:
+                logger.warning("Media key handler failed to start (continuing without media keys).")
+                media_key_handler = None
+        except Exception as e:
+            logger.warning("Media key handler setup failed: %s (continuing without media keys)", e)
+
+    # --- Hotkeys ---
+    hotkey_manager = None
+    if config.hotkeys.enabled:
+        try:
+            from .hotkeys import HotkeyManager
+
+            def _hotkey_toggle_tts():
+                if TOGGLE_FILE.exists():
+                    TOGGLE_FILE.unlink(missing_ok=True)
+                    logger.info("Hotkey: TTS disabled")
+                else:
+                    TOGGLE_FILE.touch()
+                    logger.info("Hotkey: TTS enabled")
+
+            def _hotkey_stop_playback():
+                engine.stop()
+                Q.clear()
+                logger.info("Hotkey: playback stopped and queue cleared")
+
+            def _hotkey_voice_input():
+                if voice_controller:
+                    voice_controller.start_voice_input()
+                    logger.info("Hotkey: voice input started")
+                else:
+                    logger.warning("Hotkey: voice input requested but voice controller not active")
+
+            shortcuts = {
+                "toggle_tts": config.hotkeys.toggle_tts,
+                "stop_playback": config.hotkeys.stop_playback,
+                "voice_input": config.hotkeys.voice_input,
+            }
+            callbacks = {
+                "toggle_tts": _hotkey_toggle_tts,
+                "stop_playback": _hotkey_stop_playback,
+                "voice_input": _hotkey_voice_input,
+            }
+            hotkey_manager = HotkeyManager(shortcuts, callbacks)
+            if hotkey_manager.start():
+                logger.info("Hotkey manager started.")
+            else:
+                logger.warning("Hotkey manager failed to start (continuing without hotkeys).")
+                hotkey_manager = None
+        except Exception as e:
+            logger.warning("Hotkey manager setup failed: %s (continuing without hotkeys)", e)
+
     try:
         asyncio.run(run_loop(config, engine, voice_controller))
     except KeyboardInterrupt:
+        if hotkey_manager:
+            hotkey_manager.stop()
+        if media_key_handler:
+            media_key_handler.stop()
         if voice_controller:
             voice_controller.stop()
         get_device_manager().stop_monitoring()
