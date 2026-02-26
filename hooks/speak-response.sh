@@ -16,8 +16,6 @@
 # Intentionally NOT using set -euo pipefail — every failure is handled
 # explicitly and must exit 0.
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_DIR="$(dirname "$SCRIPT_DIR")"
 DEBUG="${CLAUDE_SPEAK_DEBUG:-}"
 
 debug_log() {
@@ -28,27 +26,15 @@ debug_log() {
 # --- Read stdin into a variable (must happen before any subprocess consumes it) ---
 INPUT=$(cat)
 
-# --- Try the Python hook first ---
-PYTHON_HOOK="$REPO_DIR/claude_speak/hooks/speak_response.py"
-if [[ -f "$PYTHON_HOOK" ]]; then
-  # Prefer python3, fall back to python
-  PYTHON_BIN=""
-  if command -v python3 &>/dev/null; then
-    PYTHON_BIN="python3"
-  elif command -v python &>/dev/null; then
-    PYTHON_BIN="python"
+# --- Try the Python hook first (pip-installed claude-speak package) ---
+if command -v python3 &>/dev/null; then
+  debug_log "Delegating to Python hook"
+  echo "$INPUT" | python3 -m claude_speak.hooks.speak_response 2>/dev/null
+  PY_EXIT=$?
+  if [[ $PY_EXIT -eq 0 ]]; then
+    exit 0
   fi
-
-  if [[ -n "$PYTHON_BIN" ]]; then
-    debug_log "Delegating to Python hook via $PYTHON_BIN"
-    echo "$INPUT" | PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" \
-      "$PYTHON_BIN" -m claude_speak.hooks.speak_response 2>/dev/null
-    PY_EXIT=$?
-    if [[ $PY_EXIT -eq 0 ]]; then
-      exit 0
-    fi
-    debug_log "Python hook exited with $PY_EXIT, falling back to shell"
-  fi
+  debug_log "Python hook exited with $PY_EXIT, falling back to shell"
 fi
 
 # =========================================================================

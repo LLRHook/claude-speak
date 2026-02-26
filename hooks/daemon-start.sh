@@ -6,10 +6,6 @@ set -euo pipefail
 TOGGLE_FILE="$HOME/.claude-speak-enabled"
 DAEMON_PID="/tmp/claude-speak-daemon.pid"
 LOCK="/tmp/claude-speak-daemon.lock"
-SOURCE="${BASH_SOURCE[0]}"
-while [[ -L "$SOURCE" ]]; do SOURCE="$(readlink "$SOURCE")"; done
-SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
-PROJECT="$(dirname "$SCRIPT_DIR")"
 
 [[ ! -f "$TOGGLE_FILE" ]] && exit 0
 
@@ -23,6 +19,6 @@ fi
 exec 200>"$LOCK"
 flock -n 200 || exit 0
 
-PYTHONPATH="$PROJECT" python3 -m claude_speak.daemon &>/tmp/claude-speak-stderr.log &
+python3 -m claude_speak.daemon &>/tmp/claude-speak-stderr.log &
 disown
 exit 0
