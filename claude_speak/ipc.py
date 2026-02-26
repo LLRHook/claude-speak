@@ -261,7 +261,7 @@ class IPCServer:
                     try:
                         response = handler(msg)
                     except Exception as exc:
-                        logger.error("Handler for %r raised: %s", msg_type, exc, exc_info=True)
+                        logger.error("Handler for %r raised: %s", msg_type, exc)
                         response = {"ok": False, "error": str(exc)}
 
             reply = json.dumps(response) + "\n"
