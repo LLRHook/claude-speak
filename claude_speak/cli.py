@@ -48,11 +48,10 @@ from collections.abc import Callable
 
 from . import queue as Q
 from .config import LOG_FILE, TOGGLE_FILE, load_config
-from .daemon import START_TS_FILE, kill_all, start, status, stop_daemon
+from .daemon import kill_all, start, status, stop_daemon
 from .ipc import send_message
 from .normalizer import chunk_text, normalize
 from .tts import TTSEngine
-
 
 # ---------------------------------------------------------------------------
 # Socket helper
@@ -106,7 +105,7 @@ def cmd_status(show_memory: bool = False) -> None:
         queue_depth = resp.get("queue_depth", 0)
         uptime = resp.get("uptime", 0.0)
 
-        print(f"Daemon:  running (via socket)")
+        print("Daemon:  running (via socket)")
         print(f"Enabled: {'yes' if enabled else 'no'}")
         print(f"Queue:   {queue_depth} items")
 
@@ -451,7 +450,7 @@ def cmd_benchmark() -> None:
     import json as _json
     from pathlib import Path
 
-    from .profiler import BENCHMARK_TEXTS, BenchmarkReport, PipelineProfiler
+    from .profiler import BENCHMARK_TEXTS, PipelineProfiler
 
     # Parse optional flags
     count = 10

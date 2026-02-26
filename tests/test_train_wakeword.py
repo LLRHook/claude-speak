@@ -4,6 +4,7 @@ Unit tests for claude_speak/train_wakeword.py — custom wake word training pipe
 All audio operations use synthetic numpy data to avoid requiring a microphone.
 """
 
+import importlib.util
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -368,6 +369,10 @@ class TestEvaluate:
 # Tests: ONNX export
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(
+    not importlib.util.find_spec("onnx"),
+    reason="onnx package not installed",
+)
 class TestOnnxExport:
     """Tests for ONNX model export and inference."""
 
@@ -454,6 +459,10 @@ class TestOnnxExport:
 # Tests: End-to-end training with synthetic data
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(
+    not importlib.util.find_spec("onnx"),
+    reason="onnx package not installed",
+)
 class TestTrainWithSyntheticData:
     """Test the full pipeline from features to ONNX using synthetic audio."""
 
@@ -528,6 +537,10 @@ class TestTrainWithSyntheticData:
 # Tests: Full pipeline with mocked recording
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(
+    not importlib.util.find_spec("onnx"),
+    reason="onnx package not installed",
+)
 class TestTrainWakewordPipeline:
     """Test the train_wakeword function with mocked recording."""
 

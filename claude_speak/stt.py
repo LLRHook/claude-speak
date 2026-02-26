@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import ClassVar
 
 import numpy as np
 
@@ -53,7 +53,7 @@ class MLXWhisperRecognizer(SpeechRecognizer):
     """
 
     # Model mapping: size name -> Hugging Face model ID
-    MODEL_MAP = {
+    MODEL_MAP: ClassVar[dict[str, str]] = {
         "tiny": "mlx-community/whisper-tiny",
         "base": "mlx-community/whisper-base",
         "small": "mlx-community/whisper-small",

@@ -164,10 +164,7 @@ def validate_clip(samples: np.ndarray, sample_rate: int = SAMPLE_RATE) -> bool:
 
     # Check it's not pure silence (RMS > very low threshold)
     rms = np.sqrt(np.mean(samples.astype(np.float64) ** 2))
-    if rms < 10:  # ~10 out of 32767 for int16
-        return False
-
-    return True
+    return bool(rms >= 10)  # ~10 out of 32767 for int16
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +295,7 @@ def interactive_mode() -> None:
 
     print()
     print("=" * 60)
-    print(f"  Session complete!")
+    print("  Session complete!")
     print(f"  Positive clips saved: {results['positive']}")
     print(f"  Negative clips saved: {results['negative']}")
     print(f"  Output directory: {COLLECTED_DIR}")

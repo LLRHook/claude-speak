@@ -8,7 +8,6 @@ import shutil
 from pathlib import Path
 
 from .config import (
-    CONFIG_PATH,
     LOG_FILE,
     MUTE_FILE,
     PID_FILE,
@@ -19,7 +18,6 @@ from .config import (
     load_config,
 )
 from .models import ensure_models, ensure_stt_model, list_stt_models
-
 
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 USER_CONFIG_DIR = Path.home() / ".claude-speak"

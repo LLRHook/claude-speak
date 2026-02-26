@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +17,9 @@ class DeviceChangeMonitor:
     def __init__(self, poll_interval: float = 2.0):
         self._poll_interval = poll_interval
         self._callbacks: list[Callable[[list[str], list[str]], None]] = []
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._running = threading.Event()
-        self._last_devices: Optional[list[str]] = None
+        self._last_devices: list[str] | None = None
 
     def on_change(self, callback: Callable[[list[str], list[str]], None]) -> None:
         """Register a callback: fn(added_devices, removed_devices)."""
@@ -74,11 +74,11 @@ class AudioDeviceManager:
     """Manages audio input/output device selection and caching."""
 
     def __init__(self):
-        self._output_device: Optional[int] = None
-        self._input_device: Optional[int] = None
-        self._builtin_mic_id: Optional[int] = None
+        self._output_device: int | None = None
+        self._input_device: int | None = None
+        self._builtin_mic_id: int | None = None
         self._last_resolve_time: float = 0.0
-        self._monitor: Optional[DeviceChangeMonitor] = None
+        self._monitor: DeviceChangeMonitor | None = None
 
     def list_output_devices(self) -> list[dict]:
         """List all available output devices."""
@@ -100,7 +100,7 @@ class AudioDeviceManager:
         import sounddevice as sd
         return sd.default.device[0]
 
-    def get_device_by_name(self, substring: str, output: bool = True) -> Optional[int]:
+    def get_device_by_name(self, substring: str, output: bool = True) -> int | None:
         """Find a device by name substring. Returns device index or None."""
         import sounddevice as sd
         for i, d in enumerate(sd.query_devices()):
@@ -109,7 +109,7 @@ class AudioDeviceManager:
                 return i
         return None
 
-    def get_device_name(self, device_id: Optional[int]) -> str:
+    def get_device_name(self, device_id: int | None) -> str:
         """Get human-readable name for a device."""
         import sounddevice as sd
         try:
@@ -128,7 +128,7 @@ class AudioDeviceManager:
         except Exception:
             return False
 
-    def find_builtin_mic(self) -> Optional[int]:
+    def find_builtin_mic(self) -> int | None:
         """Find the built-in microphone device index."""
         import sounddevice as sd
         for i, d in enumerate(sd.query_devices()):
@@ -138,7 +138,7 @@ class AudioDeviceManager:
                     return i
         return None
 
-    def resolve_output(self, preference: str = "auto") -> Optional[int]:
+    def resolve_output(self, preference: str = "auto") -> int | None:
         """Resolve output device from preference string.
 
         Args:
@@ -153,7 +153,7 @@ class AudioDeviceManager:
                     return found
         return self.get_default_output()
 
-    def resolve_input(self, preference: str = "auto") -> Optional[int]:
+    def resolve_input(self, preference: str = "auto") -> int | None:
         """Resolve input device from preference string."""
         if preference and preference != "auto":
             try:
@@ -164,7 +164,7 @@ class AudioDeviceManager:
                     return found
         return self.get_default_input()
 
-    def maybe_resolve_output(self, preference: str = "auto") -> Optional[int]:
+    def maybe_resolve_output(self, preference: str = "auto") -> int | None:
         """Resolve output device, but only if enough time has passed since last resolve."""
         now = time.monotonic()
         if now - self._last_resolve_time >= _RESOLVE_INTERVAL:
@@ -206,7 +206,7 @@ class AudioDeviceManager:
 
 
 # Module-level singleton
-_manager: Optional[AudioDeviceManager] = None
+_manager: AudioDeviceManager | None = None
 
 
 def get_device_manager() -> AudioDeviceManager:

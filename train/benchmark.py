@@ -368,9 +368,9 @@ class WakeWordBenchmark:
         model_path: str,
         positive_dir: str,
         negative_dir: str,
-        thresholds: Optional[list[float]] = None,
-        output_json: Optional[str] = None,
-        roc_image: Optional[str] = None,
+        thresholds: list[float] | None = None,
+        output_json: str | None = None,
+        roc_image: str | None = None,
     ) -> BenchmarkResults:
         """Run the benchmark suite.
 

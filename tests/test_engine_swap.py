@@ -119,13 +119,13 @@ class TestCreateBackend:
     def test_unknown_engine_raises_valueerror(self):
         """Unknown engine names should raise ValueError with helpful message."""
         cfg = _make_config()
-        with pytest.raises(ValueError, match="Unknown TTS engine.*'nonexistent'"):
+        with pytest.raises(ValueError, match=r"Unknown TTS engine.*'nonexistent'"):
             create_backend("nonexistent", cfg)
 
     def test_unknown_engine_lists_available(self):
         """ValueError message should list available engines."""
         cfg = _make_config()
-        with pytest.raises(ValueError, match="kokoro.*piper.*elevenlabs"):
+        with pytest.raises(ValueError, match=r"kokoro.*piper.*elevenlabs"):
             create_backend("bad_engine", cfg)
 
     def test_piper_import_error_when_module_missing(self):

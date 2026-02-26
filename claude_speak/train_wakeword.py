@@ -250,7 +250,8 @@ def _record_examples(
     """
     # Import collect_data utilities
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "train"))
-    from collect_data import record_clip as real_record_clip, validate_clip
+    from collect_data import record_clip as real_record_clip
+    from collect_data import validate_clip
 
     record = record_fn or real_record_clip
 

@@ -81,7 +81,7 @@ def extract_features(clips: np.ndarray, batch_size: int = 64) -> np.ndarray:
     """
     from openwakeword.utils import AudioFeatures
 
-    log.info(f"Initializing feature extractor...")
+    log.info("Initializing feature extractor...")
     F = AudioFeatures(device="cpu")
 
     log.info(f"Extracting features from {clips.shape[0]} clips (batch_size={batch_size})...")

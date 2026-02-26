@@ -355,7 +355,7 @@ class TestBluetoothMicWorkaround:
         listener._running_event.set()
 
         # Now make load succeed and PortAudio fail immediately after BT check
-        import sounddevice as sd_real  # noqa: F401 — just for the type
+        import sounddevice as sd_real
         mock_sd = MagicMock()
         mock_sd.InputStream.return_value.__enter__ = MagicMock(side_effect=Exception("stop"))
         mock_sd.InputStream.return_value.__exit__ = MagicMock(return_value=False)
@@ -369,7 +369,7 @@ class TestBluetoothMicWorkaround:
         listener._load_model = fake_load_model
 
         with patch.dict("sys.modules", {"sounddevice": mock_sd, "numpy": MagicMock()}):
-            import numpy as np_mock  # noqa: F811
+            import numpy as np_mock
             mock_sd.InputStream.return_value.__enter__.side_effect = None
             mock_sd.InputStream.return_value.__enter__.return_value = MagicMock()
 

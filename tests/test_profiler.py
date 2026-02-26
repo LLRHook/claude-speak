@@ -290,7 +290,7 @@ class TestBenchmarkReport:
         text = report.to_text()
         lines = text.split("\n")
         # Should have separator lines (all dashes)
-        separator_lines = [l for l in lines if l.strip() and set(l.strip()) == {"-"}]
+        separator_lines = [line for line in lines if line.strip() and set(line.strip()) == {"-"}]
         assert len(separator_lines) >= 1
 
     def test_to_text_contains_notes(self):

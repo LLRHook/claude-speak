@@ -22,7 +22,7 @@ from __future__ import annotations
 import resource
 import time
 import tracemalloc
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 

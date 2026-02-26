@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from .config import PLAYING_FILE, QUEUE_DIR
 
@@ -73,7 +73,7 @@ class MediaKeyHandler:
     def __init__(self, callbacks: dict[str, Callable]) -> None:
         self._callbacks = callbacks
         self._running = False
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._tap = None  # CGEvent tap (Mach port)
         self._run_loop_source = None
         self._run_loop = None

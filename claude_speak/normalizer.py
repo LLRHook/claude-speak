@@ -5,10 +5,8 @@ Transforms Claude's markdown/technical text into speech-friendly prose.
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
-from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Unit expansions
@@ -1139,7 +1137,7 @@ _USER_PRON_PATH = Path.home() / ".claude-speak" / "pronunciations.toml"
 
 # Cache: (dict_of_terms, source_path, mtime_at_load)
 # mtime is None when the built-in is used (it never changes at runtime).
-_pron_cache: Optional[tuple[dict[str, str], Path, Optional[float]]] = None
+_pron_cache: tuple[dict[str, str], Path, float | None] | None = None
 
 
 def _load_toml_pronunciations(path: Path) -> dict[str, str]:

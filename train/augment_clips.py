@@ -113,10 +113,7 @@ def augment_clip(samples: np.ndarray, sr: int) -> np.ndarray:
     # Noise (70% chance)
     if rng.random() < 0.7:
         snr = rng.uniform(5, 30)  # 5dB (very noisy) to 30dB (clean)
-        if rng.random() < 0.5:
-            samples = add_noise(samples, snr)
-        else:
-            samples = add_pink_noise(samples, snr)
+        samples = add_noise(samples, snr) if rng.random() < 0.5 else add_pink_noise(samples, snr)
 
     # Silence padding (always apply)
     samples = pad_silence(samples, sr)
@@ -196,7 +193,7 @@ def main():
     # Summary
     final_pos = len(list(AUG_POS_DIR.glob("*.wav")))
     final_neg = len(list(AUG_NEG_DIR.glob("*.wav")))
-    print(f"=== Complete ===", flush=True)
+    print("=== Complete ===", flush=True)
     print(f"Augmented positive: {final_pos} clips in {AUG_POS_DIR}", flush=True)
     print(f"Augmented negative: {final_neg} clips in {AUG_NEG_DIR}", flush=True)
 

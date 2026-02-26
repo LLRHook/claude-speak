@@ -18,7 +18,6 @@ from __future__ import annotations
 import logging
 import subprocess
 import time
-from typing import Optional
 
 from .config import InputConfig
 
@@ -55,14 +54,14 @@ def _run_osascript(script: str, timeout: float = 5.0) -> subprocess.CompletedPro
                 f"osascript failed (rc={result.returncode}): {stderr}"
             )
         return result
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
         raise SuperwhisperError(
             "osascript not found — this module requires macOS"
-        )
-    except subprocess.TimeoutExpired:
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
         raise SuperwhisperError(
             f"osascript timed out after {timeout}s"
-        )
+        ) from exc
 
 
 def _is_superwhisper_running() -> bool:
@@ -275,7 +274,7 @@ def _wait_for_speech_then_silence(
 
 
 def voice_input_cycle(
-    config: Optional[InputConfig] = None,
+    config: InputConfig | None = None,
 ) -> bool:
     """Execute a full hands-free voice input cycle.
 
@@ -383,7 +382,7 @@ def _paste_at_cursor() -> None:
     _run_osascript(script)
 
 
-def builtin_voice_input_cycle(config: Optional[InputConfig] = None) -> bool:
+def builtin_voice_input_cycle(config: InputConfig | None = None) -> bool:
     """Built-in voice input: mic -> VAD -> STT -> paste -> submit.
 
     Records audio from the default input device, uses Silero VAD to detect

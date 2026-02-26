@@ -13,13 +13,12 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Optional
 
-from .config import Config, VoiceCommandsConfig, load_config, MUTE_FILE, PLAYING_FILE
-from .voice_input import voice_input_cycle, builtin_voice_input_cycle, SuperwhisperError
-from .wakeword import WakeWordListener
-from .chimes import play_ack_chime, play_error_chime
 from . import queue as Q
+from .chimes import play_ack_chime, play_error_chime
+from .config import MUTE_FILE, PLAYING_FILE, Config, load_config
+from .voice_input import SuperwhisperError, builtin_voice_input_cycle, voice_input_cycle
+from .wakeword import WakeWordListener
 
 logger = logging.getLogger(__name__)
 
@@ -93,17 +92,17 @@ class VoiceController:
 
     def __init__(
         self,
-        config: Optional[Config] = None,
-        tts_stop_callback: Optional[callable] = None,
-        voice_command_callback: Optional[callable] = None,
-        interrupt_callback: Optional[callable] = None,
+        config: Config | None = None,
+        tts_stop_callback: callable | None = None,
+        voice_command_callback: callable | None = None,
+        interrupt_callback: callable | None = None,
     ) -> None:
         self._config = config or load_config()
         self._tts_stop_callback = tts_stop_callback
         self._voice_command_callback = voice_command_callback
         self._interrupt_callback = interrupt_callback
 
-        self._wakeword_listener: Optional[WakeWordListener] = None
+        self._wakeword_listener: WakeWordListener | None = None
         self._running = False
         self._input_lock = threading.Lock()
         self._voice_input_active = False
@@ -150,7 +149,7 @@ class VoiceController:
     # Voice command handling
     # ------------------------------------------------------------------
 
-    def match_voice_command(self, text: str) -> Optional[str]:
+    def match_voice_command(self, text: str) -> str | None:
         """Check if *text* matches a configured voice command.
 
         Returns the command action name (e.g. "pause", "louder") or None.
