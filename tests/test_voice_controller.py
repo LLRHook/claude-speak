@@ -113,31 +113,47 @@ class TestHandleStop:
 # ---------------------------------------------------------------------------
 
 class TestOnWakeWord:
-    """Tests for _on_wake_word — mute toggle vs voice input."""
+    """Tests for _on_wake_word — interrupt during playback vs voice input."""
 
+    @patch("claude_speak.voice_controller.builtin_voice_input_cycle", return_value=True)
     @patch("claude_speak.voice_controller.PLAYING_FILE")
     @patch("claude_speak.voice_controller.MUTE_FILE")
-    def test_toggles_mute_when_playing(self, mock_mute, mock_playing):
-        """If TTS is playing and not muted, wake word should mute."""
+    def test_interrupts_when_playing(self, mock_mute, mock_playing, mock_builtin):
+        """If TTS is playing, wake word should interrupt and start voice input."""
         mock_playing.exists.return_value = True
         mock_mute.exists.return_value = False
-        stop_cb = MagicMock()
-        vc = _make_controller(tts_stop_callback=stop_cb)
+        interrupt_cb = MagicMock()
+        vc = _make_controller(tts_stop_callback=None)
+        vc._interrupt_callback = interrupt_cb
         vc._running = True
+        vc._wakeword_listener = MagicMock()
+        vc._wakeword_listener.is_running = True
         vc._on_wake_word()
-        mock_mute.touch.assert_called_once()
-        stop_cb.assert_called_once()
+        time.sleep(0.2)
+        interrupt_cb.assert_called_once()
+        # Sentinel files should be cleaned up
+        mock_playing.unlink.assert_called_with(missing_ok=True)
+        mock_mute.unlink.assert_called_with(missing_ok=True)
+        # Voice input should start after interrupt
+        mock_builtin.assert_called_once()
 
+    @patch("claude_speak.voice_controller.builtin_voice_input_cycle", return_value=True)
     @patch("claude_speak.voice_controller.PLAYING_FILE")
     @patch("claude_speak.voice_controller.MUTE_FILE")
-    def test_unmutes_when_muted(self, mock_mute, mock_playing):
-        """If TTS is playing AND muted, wake word should unmute."""
+    def test_interrupts_when_muted(self, mock_mute, mock_playing, mock_builtin):
+        """If TTS is playing AND muted, wake word should still interrupt."""
         mock_playing.exists.return_value = True
         mock_mute.exists.return_value = True
+        interrupt_cb = MagicMock()
         vc = _make_controller()
+        vc._interrupt_callback = interrupt_cb
         vc._running = True
+        vc._wakeword_listener = MagicMock()
+        vc._wakeword_listener.is_running = True
         vc._on_wake_word()
-        mock_mute.unlink.assert_called_once_with(missing_ok=True)
+        time.sleep(0.2)
+        interrupt_cb.assert_called_once()
+        mock_mute.unlink.assert_called_with(missing_ok=True)
 
     @patch("claude_speak.voice_controller.builtin_voice_input_cycle")
     @patch("claude_speak.voice_controller.PLAYING_FILE")
