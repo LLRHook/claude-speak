@@ -1,371 +1,360 @@
 # claude-speak
 
-**Hands-free voice interface for Claude Code.**
+**Hands-free voice interface for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).**
 
-Talk to Claude and hear it talk back -- entirely local, no cloud APIs, no subscriptions (aside from Superwhisper for voice input).
+claude-speak reads Claude's responses aloud and lets you talk back using wake word detection and local speech-to-text. It hooks into Claude Code's event system so every response is automatically spoken, and you can reply by saying "Hey Jarvis" instead of typing. The entire TTS and STT pipeline runs locally on your Mac -- no cloud APIs, no subscriptions, no data leaving your machine.
 
-- **Reads Claude's responses aloud** using local TTS via [Kokoro](https://github.com/thewh1teagle/kokoro-onnx)
-- **Wake word activation** -- say "Hey Jarvis" to start voice input
-- **Voice input via Superwhisper** with automatic transcription and submission
-- **Smart text normalization** -- 24-step pipeline handles code blocks, tables, URLs, currency, math, dates, units, abbreviations, and more
-- **Zero cloud dependency** -- everything runs on your machine
-- **Low latency** -- parallel chunk generation, SIGUSR1 instant queue notification, small chunks for fast time-to-first-audio
+The project supports three TTS engines (Kokoro, Piper, ElevenLabs), built-in speech-to-text via MLX Whisper on Apple Silicon, custom wake word training, voice blending, global hotkeys, media key integration, and a 24-step text normalization pipeline that turns Claude's markdown-heavy output into natural spoken prose.
 
----
-
-## How It Works
-
-```
-Claude Code --> Hook (PostToolUse/Stop) --> Queue (/tmp/) --> Daemon --> Normalizer --> Kokoro TTS --> Audio
-                                                                           ^
-Wake Word (openwakeword) --> Voice Controller --> Superwhisper --> Transcription --> Auto-submit to Claude
-```
-
-**Hook layer** (`hooks/speak-response.sh`): Claude Code fires hooks after every tool use and when it finishes responding. The hook script reads new lines from the transcript, strips markdown, writes the text to a file-based queue in `/tmp/claude-speak-queue/`, and sends SIGUSR1 to the daemon for instant pickup.
-
-**Daemon** (`src/daemon.py`): A persistent background process that loads the Kokoro TTS model once at startup, then watches the queue directory. When a new file appears, it normalizes the text, chunks it into small pieces (default 150 chars), and streams audio. For multi-chunk responses, the next chunk is generated while the current one plays -- eliminating dead air between sentences.
-
-**Normalizer** (`src/normalizer.py`): A 24-step regex pipeline that transforms Claude's markdown-heavy, code-heavy responses into natural spoken prose. Code blocks become brief descriptions ("Here is a Python code snippet"), tables become narrated prose, URLs become "a github link", `$99.99` becomes "99 dollars and 99 cents", and so on.
-
-**TTS Engine** (`src/tts.py`): Wraps Kokoro ONNX for streaming audio generation. Maintains a persistent output stream for gapless playback between chunks, with automatic device resolution and throttled re-checking.
-
-**Wake Word Listener** (`src/wakeword.py`): Uses [openwakeword](https://github.com/dscripka/openWakeWord) to continuously listen for "Hey Jarvis" via the microphone. Runs in a background thread with cooldown to prevent rapid-fire triggers.
-
-**Voice Controller** (`src/voice_controller.py`): Orchestrates the full voice input cycle. On wake word detection, it pauses the wake word listener (to release the mic), triggers Superwhisper to record, monitors for speech-then-silence, stops recording, waits for transcription, and auto-submits to Claude Code.
-
-**Voice Input** (`src/voice_input.py`): Handles Superwhisper interaction via macOS AppleScript. Sends keyboard shortcuts to start/stop recording, monitors the clipboard for transcription output, and presses Enter to submit.
-
-**Queue** (`src/queue.py`): File-based FIFO queue using timestamped `.txt` files in `/tmp/claude-speak-queue/`. The hook script writes, the daemon reads. Simple, reliable, no IPC dependencies.
-
-**Chimes** (`src/chimes.py`): Programmatically generated sine-wave tones for state feedback -- ascending chime on startup, descending on error, single low tone on stop. No external audio files needed.
-
----
-
-## Prerequisites
-
-- **macOS** (required -- uses `osascript`, `pbpaste`, and System Events for key simulation)
-- **Python 3.10+**
-- **Claude Code CLI** (the hooks integrate directly with Claude Code's hook system)
-- **Superwhisper** (optional, for voice input) -- a paid macOS app for local speech-to-text. Only needed if you want to talk to Claude, not just listen.
-- **Microphone access** (for wake word detection) -- macOS will prompt for permission on first use
+<!-- Demo video will go here -->
 
 ---
 
 ## Quick Start
 
+**1. Install**
+
 ```bash
-git clone https://github.com/your-username/claude-speak.git
+pip install claude-speak
+```
+
+Or install from source:
+
+```bash
+git clone https://github.com/vnicivanov/claude-speak.git
 cd claude-speak
+pip install -e .
 ```
 
-Install dependencies:
+**2. Setup**
 
 ```bash
-pip install -r requirements.txt
+claude-speak setup
 ```
 
-Download the Kokoro TTS model files into the `models/` directory:
+This downloads the Kokoro TTS model (~350 MB), installs Claude Code hooks, creates a default config, and verifies audio output. Everything is stored in `~/.claude-speak/`.
 
-```
-models/
-  kokoro-v1.0.onnx    (325 MB)
-  voices-v1.0.bin     (28 MB)
-```
+**3. Use**
 
-See the [Kokoro ONNX releases](https://github.com/thewh1teagle/kokoro-onnx/releases) for download links.
+Start a Claude Code session -- claude-speak launches automatically via hooks. Claude's responses are spoken aloud. Say "Hey Jarvis" to reply by voice (requires the `wakeword` extra).
 
-Enable voice output:
+To test manually:
 
 ```bash
-touch ~/.claude-speak-enabled
+claude-speak say "Hello from claude-speak."
 ```
-
-Test that audio works:
-
-```bash
-python cli.py say "Hello, this is claude-speak."
-```
-
-Start the daemon in the background:
-
-```bash
-python cli.py start
-```
-
-### Hook Setup
-
-To have Claude Code automatically trigger speech, copy the hook configuration into your Claude Code settings. The `claude-hooks.json` file in the project root shows the required hook definitions:
-
-- **SessionStart**: starts the daemon automatically
-- **PostToolUse**: sends new assistant text to the queue after each tool use
-- **Stop**: sends final assistant text when Claude finishes responding
-- **SessionEnd**: stops the daemon when the session ends
-
-Update the `REPO_DIR` placeholder in `claude-hooks.json` to match your installation path, then add the hooks to your Claude Code configuration (see `HOOKS-SETUP.md` for detailed instructions).
 
 ---
 
-## Configuration
+## Features
 
-All configuration lives in `claude-speak.toml` at the project root. Copy `claude-speak.toml.example` to get started. Every setting has a sensible default -- you only need to override what you want to change.
+| Feature | Description |
+|---------|-------------|
+| **TTS output** | Every Claude Code response is automatically spoken aloud via local TTS |
+| **Multiple TTS engines** | Kokoro (default, local), Piper (local, lightweight), ElevenLabs (cloud) |
+| **Voice blending** | Mix voices with weighted ratios, e.g. `"bm_george:60+bm_fable:40"` |
+| **Wake word detection** | Say "Hey Jarvis" (or a custom wake word) to start voice input |
+| **Built-in STT** | Local speech-to-text via MLX Whisper on Apple Silicon (no Superwhisper needed) |
+| **Custom wake words** | Train your own wake word model from recorded samples |
+| **Text normalization** | 24-step pipeline converts code blocks, URLs, currency, math, dates, units, and more into natural speech |
+| **SSML-like markup** | Control speech with `<pause>`, `<slow>`, `<fast>`, and `<spell>` tags |
+| **Global hotkeys** | System-wide keyboard shortcuts for toggle, stop, and voice input |
+| **Media key support** | Use hardware play/pause and volume keys to control TTS playback |
+| **Voice commands** | Say "pause", "louder", "faster", "repeat", etc. during playback |
+| **Stop phrases** | Say "stop", "quiet", or "shut up" to halt speech immediately |
+| **Low latency** | Parallel chunk generation, SIGUSR1 instant queue notification, persistent audio stream |
+| **Hot-reload config** | Change settings without restarting -- the daemon reloads config automatically |
+| **Audio device routing** | Route output to any device by name (e.g. "AirPods") or index, with automatic switching |
+| **Bluetooth mic workaround** | Automatically uses built-in mic when output is Bluetooth (avoids codec downgrade) |
+| **Chimes** | Programmatic audio feedback tones for state changes (ready, error, stop) |
 
-The daemon hot-reloads the config file every 30 seconds, so most changes take effect without a restart.
+---
 
-Environment variables override TOML values: `CLAUDE_SPEAK_VOICE`, `CLAUDE_SPEAK_SPEED`, `CLAUDE_SPEAK_DEVICE`.
+## Configuration Reference
+
+All configuration lives in `claude-speak.toml` at the project root (or `~/.claude-speak/config.toml`). Copy `claude-speak.toml.example` to get started. Every setting has a sensible default.
+
+The daemon hot-reloads the config file every 30 seconds. Environment variables (`CLAUDE_SPEAK_VOICE`, `CLAUDE_SPEAK_SPEED`, `CLAUDE_SPEAK_DEVICE`) override TOML values.
+
+### `[tts]`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `engine` | `"kokoro"` | TTS engine: `"kokoro"`, `"piper"`, or `"elevenlabs"` |
+| `voice` | `"af_sarah"` | Voice ID, or a blend like `"bm_george:60+bm_fable:40"` |
+| `speed` | `1.0` | Playback speed multiplier (1.0 = natural, 1.3 = conversational) |
+| `lang` | `"en-us"` | Language code for Kokoro (`en-us`, `en-gb`, etc.) |
+| `device` | `"auto"` | Audio output: `"auto"`, a substring like `"AirPods"`, or a device index |
+| `max_chunk_chars` | `400` | Max characters per TTS chunk (smaller = faster first audio) |
+| `volume` | `1.0` | TTS speech volume (0.0--1.0) |
+| `elevenlabs_api_key` | `""` | ElevenLabs API key (env var `ELEVENLABS_API_KEY` takes priority) |
+
+### `[wakeword]`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `false` | Enable wake word detection |
+| `engine` | `"openwakeword"` | Detection engine |
+| `model` | `"hey_jarvis"` | Built-in model name or path to a custom `.onnx` file |
+| `stop_model` | `""` | Path to a trained stop-word `.onnx` model |
+| `sensitivity` | `0.5` | Detection threshold (0.0--1.0; lower = fewer false positives) |
+| `stop_sensitivity` | `0.5` | Separate threshold for stop model |
+| `stop_phrases` | `["stop", "quiet", "shut up"]` | Phrases that immediately halt TTS |
+
+### `[input]`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `backend` | `"builtin"` | STT backend: `"builtin"`, `"superwhisper"`, or `"auto"` |
+| `auto_submit` | `true` | Automatically press Enter after transcription |
+| `stt_backend` | `"auto"` | STT engine: `"auto"`, `"mlx"`, or `"whisper_cpp"` |
+| `stt_model` | `"base"` | Whisper model size: `"tiny"`, `"base"`, `"small"`, `"medium"` |
+| `vad_threshold` | `0.5` | Silero VAD speech probability threshold |
+
+### `[audio]`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `chimes` | `true` | Play chime sounds on state changes |
+| `greeting` | `"Ready."` | Text spoken on daemon start (empty string to disable) |
+| `volume` | `0.3` | Chime volume (0.0--1.0; does not affect TTS voice volume) |
+| `bt_mic_workaround` | `true` | Use built-in mic when output is Bluetooth |
+| `media_keys_enabled` | `true` | Intercept hardware media keys for TTS control |
+
+### `[normalization]`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `skip_code` | `true` | Replace code blocks with brief spoken descriptions |
+| `expand_units` | `true` | Expand unit abbreviations (`"5ms"` becomes `"5 milliseconds"`) |
+| `expand_abbreviations` | `true` | Expand tech abbreviations (`"API"` becomes `"A P I"`) |
+| `shorten_paths` | `true` | Shorten long file paths to just the filename |
+| `custom_pronunciations` | `""` | Path to a custom `pronunciations.toml` file |
+| `context_aware` | `true` | Insert SSML tags based on detected content type |
+
+### `[hotkeys]`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `true` | Enable global keyboard shortcuts |
+| `toggle_tts` | `"cmd+shift+s"` | Toggle TTS on/off |
+| `stop_playback` | `"cmd+shift+x"` | Stop current playback |
+| `voice_input` | `"cmd+shift+v"` | Trigger voice input |
+
+### `[voice_commands]`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `pause` | `"pause"` | Pause TTS playback |
+| `resume` | `"resume"` | Resume TTS playback |
+| `repeat` | `"repeat"` | Repeat last spoken text |
+| `louder` | `"louder"` | Increase volume |
+| `quieter` | `"quieter"` | Decrease volume |
+| `faster` | `"faster"` | Increase speed |
+| `slower` | `"slower"` | Decrease speed |
+| `stop` | `"stop"` | Stop playback and clear queue |
+
+---
+
+## Available Voices
+
+### Kokoro (default engine)
+
+Kokoro ships with a set of built-in voices. Run `claude-speak voices` to see the full list. Common options:
+
+| Voice ID | Description |
+|----------|-------------|
+| `af_sarah` | American female (default) |
+| `af_bella` | American female |
+| `af_nicole` | American female |
+| `am_adam` | American male |
+| `am_michael` | American male |
+| `bf_emma` | British female |
+| `bm_george` | British male |
+| `bm_fable` | British male |
+
+You can blend any two voices:
 
 ```toml
 [tts]
-# Voice ID for Kokoro TTS.
-# Options include: af_sarah, af_bella, af_nicole, am_adam, am_michael, etc.
-voice = "af_sarah"
-
-# Playback speed multiplier. 1.0 = natural, 1.3 = conversational, 1.5 = fast.
-speed = 1.3
-
-# Audio output device.
-#   "auto"    -- system default output device
-#   "AirPods" -- substring match against device names
-#   "3"       -- device index number
-device = "auto"
-
-# Maximum characters per TTS chunk. Smaller = faster first audio.
-# Parallel generation of subsequent chunks eliminates gaps between them.
-# Range: 50-500.
-max_chunk_chars = 150
-
-[wakeword]
-# Enable wake word detection.
-enabled = true
-
-# Detection engine. Currently only "openwakeword" is supported.
-engine = "openwakeword"
-
-# Wake word model name or path to a custom .onnx file.
-# Built-in options: "hey_jarvis", "hey_mycroft", "alexa", etc.
-model = "hey_jarvis"
-
-# Detection sensitivity (0.0 to 1.0).
-# Lower = fewer false positives, higher = fewer missed detections.
-sensitivity = 0.5
-
-# Phrases that immediately stop TTS playback when detected.
-stop_phrases = ["stop", "quiet", "shut up"]
-
-[input]
-# Use Superwhisper for voice-to-text. Requires the Superwhisper app.
-superwhisper = true
-
-# Automatically press Enter to submit transcribed text to Claude.
-auto_submit = true
-
-[audio]
-# Play short chime sounds on state changes (ready, error, stop).
-chimes = true
-
-# Text spoken when the daemon starts. Set to "" to disable.
-greeting = "Ready."
-
-# Chime volume (0.0 to 1.0). Does not affect TTS voice volume.
-volume = 0.3
-
-[normalization]
-# Replace code blocks with brief spoken descriptions.
-skip_code = true
-
-# Expand unit abbreviations: "5ms" -> "5 milliseconds".
-expand_units = true
-
-# Expand tech abbreviations: "API" -> "A P I", "CLI" -> "C L I".
-expand_abbreviations = true
-
-# Shorten long file paths to just the filename.
-shorten_paths = true
+voice = "am_adam:60+bm_george:40"   # 60% Adam, 40% George
 ```
+
+Preview voices before choosing:
+
+```bash
+claude-speak preview af_sarah
+claude-speak preview "am_adam:60+bm_george:40"
+claude-speak preview --all
+```
+
+### Piper (alternative local engine)
+
+Piper voices are downloaded on first use from HuggingFace:
+
+| Voice | Description |
+|-------|-------------|
+| `en_US-lessac-medium` | US English, female, general purpose |
+| `en_US-ryan-medium` | US English, male |
+| `en_GB-alan-medium` | British English, male |
+
+### ElevenLabs (cloud engine)
+
+Use any ElevenLabs voice ID. Requires an API key set via `elevenlabs_api_key` in config or the `ELEVENLABS_API_KEY` environment variable.
+
+---
+
+## Architecture Overview
+
+```
+Claude Code --> Hook (PostToolUse/Stop) --> IPC Socket --> Daemon --> Normalizer --> TTS Engine --> Audio
+                                                            ^
+Wake Word (openwakeword) --> Voice Controller --> STT (MLX Whisper) --> Auto-submit to Claude
+```
+
+**Hook layer**: Claude Code fires hooks after every tool use and at response completion. The hook sends new text to the daemon via a Unix domain socket (with file-based queue fallback).
+
+**Daemon**: A persistent background process that loads the TTS model once, watches for incoming text, normalizes it, chunks it, and streams audio with parallel generation for gapless playback.
+
+**Normalizer**: A 24-step regex pipeline that transforms markdown, code blocks, tables, URLs, currency, math, dates, units, abbreviations, and more into natural spoken prose.
+
+**TTS Engine**: Backend-agnostic synthesis with streaming playback, device routing, and gapless chunk transitions via a persistent audio stream.
+
+**Voice Controller**: Orchestrates wake word detection, voice activity detection (Silero VAD), speech-to-text (MLX Whisper), and auto-submission to Claude Code.
+
+For a detailed breakdown of every module, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
 ## CLI Commands
 
-All commands are invoked through `cli.py`:
+All commands are available via the `claude-speak` entry point after installation.
+
+### Daemon
 
 | Command | Description |
 |---------|-------------|
-| `python cli.py start` | Start the daemon in the background |
-| `python cli.py stop` | Stop the daemon gracefully |
-| `python cli.py restart` | Kill all instances and start fresh |
-| `python cli.py status` | Show daemon PID, uptime, queue depth, config summary |
-| `python cli.py say "text"` | Speak text immediately (bypasses daemon, loads model inline) |
-| `python cli.py queue "text"` | Normalize, chunk, and queue text for the daemon to speak |
-| `python cli.py clear` | Clear the TTS queue |
-| `python cli.py log` | Show the last 20 lines of `daemon.log` |
-| `python cli.py config` | Print all current configuration values |
-| `python cli.py voices` | List all available Kokoro voices |
-| `python cli.py enable` | Enable voice output (creates `~/.claude-speak-enabled`) |
-| `python cli.py disable` | Disable voice output (daemon stays loaded but silent) |
-| `python cli.py listen` | Start the voice controller standalone (wake word + voice input) |
-| `python cli.py voice-input` | Trigger a single voice input cycle manually |
-| `python cli.py kill-all` | Nuclear option -- kill all claude-speak processes |
+| `claude-speak start` | Start the daemon in the background |
+| `claude-speak stop` | Stop the daemon gracefully |
+| `claude-speak restart` | Kill all instances and start fresh |
+| `claude-speak status` | Show PID, uptime, queue depth, voice, speed, device |
+| `claude-speak kill-all` | Force-kill all claude-speak processes |
+
+### Speech
+
+| Command | Description |
+|---------|-------------|
+| `claude-speak say "text"` | Speak text immediately (loads model inline, no daemon needed) |
+| `claude-speak speak "text"` | Send text to the running daemon via IPC socket |
+| `claude-speak queue "text"` | Normalize, chunk, and enqueue text for the daemon |
+| `claude-speak clear` | Clear the TTS queue |
+
+### Playback Control
+
+| Command | Description |
+|---------|-------------|
+| `claude-speak enable` | Enable voice output |
+| `claude-speak disable` | Disable voice output (daemon stays loaded but silent) |
+| `claude-speak pause` | Mute TTS playback |
+| `claude-speak resume` | Unmute TTS playback |
+| `claude-speak volume 0.8` | Set TTS volume (0.1--1.0) |
+| `claude-speak speed 1.3` | Set TTS speed |
+
+### Voice & Models
+
+| Command | Description |
+|---------|-------------|
+| `claude-speak voices` | List all available TTS voices |
+| `claude-speak preview af_sarah` | Hear a sample in a specific voice |
+| `claude-speak preview --all` | Hear a sample in every voice |
+| `claude-speak stt-models` | List available Whisper STT models and sizes |
+
+### Voice Input
+
+| Command | Description |
+|---------|-------------|
+| `claude-speak listen` | Start the voice controller (wake word + auto-submit) |
+| `claude-speak voice-input` | Trigger a single voice input cycle |
+| `claude-speak train-wakeword "hey claude"` | Train a custom wake word from recorded samples |
+
+### Setup & Config
+
+| Command | Description |
+|---------|-------------|
+| `claude-speak setup` | First-time setup (download models, install hooks, create config) |
+| `claude-speak config` | Print all current configuration values |
+| `claude-speak log` | Show the last 20 lines of the daemon log |
+| `claude-speak uninstall` | Remove runtime artifacts and hooks |
+| `claude-speak uninstall --all` | Also remove `~/.claude-speak/` (models and config) |
 
 ---
 
-## Voice Commands
+## Optional Dependencies
 
-### Wake Word
+The base install includes only what is needed for Kokoro TTS output. Additional features require optional extras:
 
-Say **"Hey Jarvis"** to activate voice input. The system will:
+```bash
+# Wake word detection ("Hey Jarvis" and custom wake words)
+pip install claude-speak[wakeword]
 
-1. Detect the wake word via openwakeword (running continuously in a background thread).
-2. Pause the wake word listener to release the microphone.
-3. Trigger Superwhisper to start recording (sends Option+Space).
-4. Monitor the microphone for speech, then wait for 3 seconds of silence.
-5. Trigger Superwhisper again to stop recording.
-6. Wait for Superwhisper to transcribe and paste the text.
-7. Press Enter to submit the transcription to Claude Code.
-8. Resume the wake word listener.
+# Piper TTS engine (lightweight local alternative)
+pip install claude-speak[piper]
 
-### Stop Phrases
+# ElevenLabs cloud TTS
+pip install claude-speak[elevenlabs]
 
-Say **"stop"**, **"quiet"**, or **"shut up"** to immediately:
+# Built-in speech-to-text via MLX Whisper (Apple Silicon)
+pip install claude-speak[stt]
 
-- Abort current TTS playback
-- Clear the entire TTS queue
-- Play a short confirmation chime
+# Global hotkeys and media key support (requires macOS Accessibility permissions)
+pip install claude-speak[macos-extras]
 
-Stop phrases are detected when the hook sends them through the queue. The daemon recognizes them and halts instead of speaking.
+# Custom wake word training
+pip install claude-speak[train]
 
----
+# Development tools (ruff, pytest, mypy, pre-commit)
+pip install claude-speak[dev]
 
-## Text Normalization
-
-The normalizer is a 24-step pipeline that transforms Claude's raw markdown output into natural spoken text. Each step uses pre-compiled regex patterns for performance.
-
-### Pipeline Order and Examples
-
-| Step | Input | Output |
-|------|-------|--------|
-| Code blocks | ` ```python\ndef foo(): ... ``` ` | "Here is a Python code snippet." |
-| Tables | `\| Name \| Type \| ...` | "A table with columns Name and Type. Row 1: ..." |
-| Numbered lists | `1. Install\n2. Run` | "First, Install. Second, Run." |
-| Bullet lists | `- Fast\n- Simple` | "Fast. Simple." |
-| Raw code lines | `$ pip install foo` | *(removed)* |
-| URLs | `https://github.com/user/repo` | "a github link" |
-| Emails | `user@example.com` | "user at example dot com" |
-| File paths | `/Users/victor/projects/src/tts.py` | "tts dot py" |
-| Currency | `$99.99` | "99 dollars and 99 cents" |
-| Currency (magnitude) | `$1.5M` | "1.5 million dollars" |
-| Percentages | `75%` | "75 percent" |
-| Ordinals | `1st`, `21st` | "first", "twenty first" |
-| Number commas | `1,234,567` | "1234567" |
-| Time (24h) | `14:30` | "2:30 PM" |
-| Fractions | `3/4` | "three quarters" |
-| Ratios | `16:9` | "16 to 9" |
-| Dates (ISO) | `2024-02-26` | "February 26, 2024" |
-| Temperature | `72°F` | "72 degrees Fahrenheit" |
-| Math operators | `x != y` | "x not equals y" |
-| Units | `27MB` | "27 megabytes" |
-| Versions | `v1.0.3` | "version 1 point 0 point 3" |
-| Decimals | `1.5` | "one point five" |
-| File extensions | `script.py` | "script dot py" |
-| Abbreviations | `API`, `CLI` | "A P I", "C L I" |
-| Stop words | `e.g.`, `etc.` | "for example", "etcetera" |
-| Slash pairs | `true/false` | "true or false" |
-| Technical punctuation | backticks, arrows, braces, snake_case | cleaned/spoken form |
-
-The pipeline handles over 50 tech abbreviations, 20+ unit types, 30+ file extensions, and 4 currency symbols with correct singular/plural forms.
-
----
-
-## Performance
-
-The system is designed for low latency from the moment Claude finishes writing to the moment audio starts playing.
-
-- **SIGUSR1 instant notification**: The hook script signals the daemon immediately after writing to the queue. No polling delay -- the daemon wakes up within milliseconds.
-- **Parallel chunk generation**: For multi-chunk responses, the next chunk is generated by Kokoro while the current one plays. This uses `asyncio.create_task` + `asyncio.to_thread` for true concurrency.
-- **Small default chunk size** (150 chars): Kokoro generates audio for a short chunk in ~200-400ms, so the first audio starts quickly. Parallel generation ensures subsequent chunks are ready before the current one finishes.
-- **Pre-compiled regex patterns**: All 30+ regex patterns in the normalizer are compiled at module import time, not per-call.
-- **Persistent audio stream**: The TTS engine maintains a single `sounddevice.OutputStream` across chunks for gapless playback -- no stream creation overhead between sentences.
-- **Device resolution throttling**: Audio device lookup happens at most once every 30 seconds, not per chunk.
-- **Hot-reload config**: The daemon checks the config file mtime every 30 seconds and reloads without restart.
-- **Performance logging**: Every stage is timed and logged with `[perf]` prefixes in `daemon.log` for easy profiling.
-
----
-
-## Troubleshooting
-
-**No audio output**
-- Check that the daemon is running: `python cli.py status`
-- Verify the toggle file exists: `ls ~/.claude-speak-enabled` (create it with `python cli.py enable`)
-- Test audio directly: `python cli.py say "test"` -- this bypasses the daemon and loads the model inline
-- Check the device setting in `claude-speak.toml` -- try `device = "auto"` first
-- Ensure the Kokoro model files exist in `models/`
-
-**Wake word not detecting**
-- Grant microphone permission in System Settings > Privacy & Security > Microphone
-- Check that `[wakeword] enabled = true` in the config
-- Adjust `sensitivity` -- try 0.3 for fewer false positives or 0.7 for more responsive detection
-- Run `python cli.py listen` to test wake word detection standalone
-
-**Superwhisper not activating**
-- Verify Superwhisper is running (check the menu bar icon)
-- Confirm the keyboard shortcut is Option+Space (the default)
-- Check that `[input] superwhisper = true` in the config
-- Run `python cli.py voice-input` for a single test cycle
-
-**Daemon not starting**
-- Check the log: `python cli.py log`
-- Look for lock file issues: `ls /tmp/claude-speak-daemon.lock`
-- Nuclear option: `python cli.py kill-all` then `python cli.py start`
-
-**High latency**
-- Check `daemon.log` for `[perf]` lines to identify the bottleneck
-- Reduce `max_chunk_chars` (try 100) for faster time-to-first-audio
-- Ensure no other heavy processes are competing for CPU during TTS generation
-
----
-
-## Known Limitations
-
-- **macOS only** -- depends on `osascript`, `pbpaste`, and System Events for keyboard simulation
-- **Kokoro TTS latency** -- first audio segment takes ~200-800ms to generate depending on chunk size and CPU load
-- **Superwhisper is paid** -- a third-party macOS app required only for voice input (TTS output works without it)
-- **Wake word models are pre-trained** -- limited to models bundled with openwakeword (`hey_jarvis`, `hey_mycroft`, `alexa`, etc.) or custom ONNX models
-- **No streaming from Claude Code** -- hooks fire after tool completion or when Claude stops responding, not during generation. You hear the response after it is written, not as it streams.
-
----
-
-## Project Structure
-
+# Install everything
+pip install claude-speak[wakeword,stt,macos-extras]
 ```
-claude-speak/
-  cli.py                    # CLI entry point
-  claude-speak.toml         # Configuration (user-editable)
-  claude-speak.toml.example # Annotated example config
-  claude-hooks.json         # Claude Code hook definitions
-  pyproject.toml            # Python package metadata
-  requirements.txt          # Pip dependencies
-  src/
-    daemon.py               # Main daemon loop and lifecycle
-    tts.py                  # Kokoro TTS engine wrapper
-    normalizer.py           # 24-step text normalization pipeline
-    wakeword.py             # Wake word detection (openwakeword)
-    voice_input.py          # Superwhisper integration
-    voice_controller.py     # Orchestrates wake word -> voice input
-    config.py               # Configuration loading and defaults
-    queue.py                # File-based FIFO queue
-    chimes.py               # Programmatic audio feedback tones
-  hooks/
-    speak-response.sh       # PostToolUse/Stop hook -- queue new text
-    daemon-start.sh         # SessionStart hook -- launch daemon
-    daemon-stop.sh          # SessionEnd hook -- stop daemon
-  models/
-    kokoro-v1.0.onnx        # Kokoro TTS model (325 MB, not in git)
-    voices-v1.0.bin         # Voice data (28 MB, not in git)
-  tests/
-    ...
-```
+
+---
+
+## FAQ
+
+**Q: Does this work on Linux or Windows?**
+A: Not yet. claude-speak currently requires macOS for audio routing, Accessibility APIs (hotkeys, media keys), and Apple Silicon acceleration (MLX Whisper). Linux support is planned -- track progress at [github.com/vnicivanov/claude-speak/issues](https://github.com/vnicivanov/claude-speak/issues).
+
+**Q: Do I need a paid Superwhisper subscription for voice input?**
+A: No. The default STT backend is built-in MLX Whisper, which is fully local and free. Superwhisper is still supported as an alternative backend (`backend = "superwhisper"` in `[input]`), but it is no longer required.
+
+**Q: How large are the model downloads?**
+A: The Kokoro TTS model is ~350 MB total (ONNX model + voice data). Whisper STT models range from ~39 MB (tiny) to ~769 MB (medium). The `base` model (~74 MB) is the default and works well for most use cases. Models are downloaded once to `~/.claude-speak/models/` and cached.
+
+**Q: Can I use a custom wake word instead of "Hey Jarvis"?**
+A: Yes. Run `claude-speak train-wakeword "hey claude"` to record samples and train a custom model. The trained `.onnx` file is saved automatically, and you can point to it in config: `model = "/path/to/custom.onnx"`.
+
+**Q: How do I reduce latency to first audio?**
+A: Lower `max_chunk_chars` in `[tts]` (try 100--200). Smaller chunks generate faster, and parallel generation ensures subsequent chunks are ready before the current one finishes playing. Check `claude-speak log` for `[perf]` lines to identify bottlenecks.
+
+**Q: Can I use ElevenLabs instead of local TTS?**
+A: Yes. Install the extra (`pip install claude-speak[elevenlabs]`), set `engine = "elevenlabs"` in `[tts]`, and provide your API key via `elevenlabs_api_key` in config or the `ELEVENLABS_API_KEY` environment variable.
+
+**Q: Why does the daemon not respond after I restart Claude Code?**
+A: The SessionStart hook automatically starts the daemon, but if it was killed abnormally, a stale lock file might block startup. Run `claude-speak kill-all` then `claude-speak start`, or check `claude-speak log` for details.
+
+**Q: How do I route audio to AirPods or another device?**
+A: Set `device = "AirPods"` in `[tts]` (substring match against device names). Use `device = "auto"` for the system default. The daemon re-checks the device every 30 seconds, so it picks up newly connected devices automatically.
+
+---
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on development setup, running tests, and submitting pull requests.
 
 ---
 
 ## License
 
-MIT
+[MIT](LICENSE)
