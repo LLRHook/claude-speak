@@ -67,6 +67,55 @@ class WakeWordListener:
 
     During TTS playback, swaps to the built-in mic to avoid Bluetooth
     profile switching on wireless headphones.
+
+    Thread safety
+    -------------
+    This class is used from multiple threads:
+
+      - **Main thread**: calls start(), stop(), pause(), resume(),
+        use_builtin_mic(), use_default_mic(), reads is_running.
+      - **wakeword-listener thread** (_listen_loop): reads _running_event,
+        _paused_event, _swap_mic_event; writes _model, _builtin_mic_id.
+      - **Daemon callback threads**: may invoke on_wake / on_stop_phrase
+        callbacks, which in turn call pause()/resume()/use_*_mic() from
+        the voice-input-cycle thread.
+
+    Shared mutable state and synchronisation:
+
+      _running_event  (threading.Event)
+          set()  = listener is running;  clear() = stopped.
+          Written by: main thread (start, stop), listener thread (on error).
+          Read by:    listener thread (_listen_loop).
+          Protection: Event is inherently thread-safe.
+
+      _paused_event   (threading.Event)
+          set()  = mic paused (voice input has the mic);  clear() = active.
+          Written by: main thread / voice-input thread (pause, resume).
+          Read by:    listener thread (_listen_loop).
+          Protection: Event is inherently thread-safe.
+
+      _swap_mic_event (threading.Event)
+          set()  = use built-in mic;  clear() = use default mic.
+          Written by: daemon/voice-controller thread (use_builtin_mic,
+                      use_default_mic).
+          Read by:    listener thread (_listen_loop).
+          Protection: Event is inherently thread-safe.
+
+      _wake_callbacks / _stop_phrase_callbacks (lists)
+          Written by: main thread (on_wake, on_stop_phrase) before start().
+          Read by:    listener thread (_fire_*_callbacks).
+          Protection: safe because callbacks are registered before start()
+                      and never mutated afterwards.
+
+      _model (openwakeword Model instance)
+          Written by: listener thread (_load_model, stop).
+          Read by:    listener thread (_process_audio).
+          Protection: single-writer (listener thread); main thread sets to
+                      None in stop() after join().
+
+      _last_wake_time / _last_stop_time (floats)
+          Written and read only by: listener thread (_process_audio).
+          Protection: single-thread access; no lock needed.
     """
 
     def __init__(self, config: Optional[WakeWordConfig] = None) -> None:
@@ -74,14 +123,18 @@ class WakeWordListener:
         self._wake_callbacks: list[Callable[[], None]] = []
         self._stop_phrase_callbacks: list[Callable[[str], None]] = []
         self._thread: Optional[threading.Thread] = None
-        self._running = False
-        self._paused = False  # True = mic closed (during voice input)
-        self._swap_mic = False  # True = use built-in mic (during TTS)
+
+        # Threading events — replace plain booleans for cross-thread safety.
+        # See class docstring for full thread-safety analysis.
+        self._running_event = threading.Event()    # set() = running, clear() = stopped
+        self._paused_event = threading.Event()     # set() = paused,  clear() = active
+        self._swap_mic_event = threading.Event()   # set() = builtin, clear() = default
+
         self._model = None
         self._stop_model_name: Optional[str] = None  # key in prediction dict
         self._builtin_mic_id: Optional[int] = None
 
-        # Cooldown to prevent rapid-fire detections
+        # Cooldown to prevent rapid-fire detections (listener thread only)
         self._last_wake_time: float = 0.0
         self._last_stop_time: float = 0.0
         self._cooldown_seconds: float = 2.0
@@ -97,7 +150,7 @@ class WakeWordListener:
         self._stop_phrase_callbacks.append(callback)
 
     def start(self) -> bool:
-        if self._running:
+        if self._running_event.is_set():
             logger.warning("WakeWordListener is already running")
             return False
 
@@ -108,8 +161,8 @@ class WakeWordListener:
             logger.warning("openwakeword or sounddevice not installed")
             return False
 
-        self._running = True
-        self._paused = False
+        self._running_event.set()
+        self._paused_event.clear()  # start in active (non-paused) state
         self._thread = threading.Thread(
             target=self._listen_loop,
             name="wakeword-listener",
@@ -125,7 +178,7 @@ class WakeWordListener:
         return True
 
     def stop(self) -> None:
-        self._running = False
+        self._running_event.clear()
         if self._thread is not None:
             self._thread.join(timeout=3.0)
             self._thread = None
@@ -133,26 +186,26 @@ class WakeWordListener:
         logger.info("Wake word listener stopped")
 
     def pause(self) -> None:
-        """Pause mic input entirely (during voice input — Superwhisper needs the mic)."""
-        self._paused = True
+        """Pause mic input entirely (during voice input -- Superwhisper needs the mic)."""
+        self._paused_event.set()
         logger.debug("Wake word listener paused")
 
     def resume(self) -> None:
         """Resume mic input after pause."""
-        self._paused = False
+        self._paused_event.clear()
         logger.debug("Wake word listener resumed")
 
     def use_builtin_mic(self) -> None:
         """Swap to built-in mic (during TTS to avoid BT profile switch)."""
-        self._swap_mic = True
+        self._swap_mic_event.set()
 
     def use_default_mic(self) -> None:
         """Swap back to default mic (after TTS finishes)."""
-        self._swap_mic = False
+        self._swap_mic_event.clear()
 
     @property
     def is_running(self) -> bool:
-        return self._running
+        return self._running_event.is_set()
 
     # ------------------------------------------------------------------
     # Internal
@@ -197,7 +250,7 @@ class WakeWordListener:
         import sounddevice as sd
 
         if not self._load_model():
-            self._running = False
+            self._running_event.clear()
             return
 
         self._builtin_mic_id = _find_builtin_mic()
@@ -207,15 +260,18 @@ class WakeWordListener:
         logger.info("Wake word listener ready")
 
         try:
-            while self._running:
-                # Paused = mic fully released (voice input has the mic)
-                if self._paused:
+            while self._running_event.is_set():
+                # Paused = mic fully released (voice input has the mic).
+                # Use wait() with timeout so we wake promptly on resume
+                # instead of busy-polling with sleep().
+                if self._paused_event.is_set():
                     time.sleep(0.1)
                     continue
 
-                # Pick device
+                # Pick device: use built-in mic during TTS to avoid BT
+                # profile switch; otherwise use the system default.
                 device = None
-                if self._swap_mic and self._builtin_mic_id is not None:
+                if self._swap_mic_event.is_set() and self._builtin_mic_id is not None:
                     device = self._builtin_mic_id
 
                 try:
@@ -226,10 +282,13 @@ class WakeWordListener:
                         blocksize=_CHUNK_SAMPLES,
                         device=device,
                     ) as stream:
-                        current_swap = self._swap_mic
-                        while (self._running
-                               and not self._paused
-                               and self._swap_mic == current_swap):
+                        # Snapshot the current mic-swap state so we can
+                        # detect when it changes and re-open the stream
+                        # on the new device.
+                        current_swap = self._swap_mic_event.is_set()
+                        while (self._running_event.is_set()
+                               and not self._paused_event.is_set()
+                               and self._swap_mic_event.is_set() == current_swap):
                             audio_data, overflowed = stream.read(_CHUNK_SAMPLES)
                             if overflowed:
                                 logger.debug("Audio input overflowed")
@@ -241,7 +300,7 @@ class WakeWordListener:
 
         except Exception as e:
             logger.error("Unexpected error in listen loop: %s", e)
-            self._running = False
+            self._running_event.clear()
 
     def _process_audio(self, samples) -> None:
         if self._model is None:

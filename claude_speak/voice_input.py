@@ -217,7 +217,14 @@ def _wait_for_speech_then_silence(
         True if speech-then-silence was detected, False on timeout.
     """
     import numpy as np
-    import sounddevice as sd
+    try:
+        import sounddevice as sd
+    except ImportError:
+        logger.error(
+            "sounddevice is not installed — mic monitoring unavailable. "
+            "Install it with: pip install sounddevice"
+        )
+        return False
 
     sample_rate = 16000
     chunk_samples = 1600  # 100ms chunks
@@ -292,12 +299,13 @@ def voice_input_cycle(
         logger.warning("Superwhisper is disabled in config")
         return False
 
-    # Preflight: check if Superwhisper is running
+    # Preflight: check if Superwhisper is running — abort immediately if not
     if not _is_superwhisper_running():
-        logger.warning(
-            "Superwhisper does not appear to be running. "
-            "The shortcut will still be sent, but it may not work."
+        logger.error(
+            "Superwhisper is not running. Voice input requires Superwhisper to be active. "
+            "Start it from /Applications or install from https://superwhisper.com"
         )
+        return False
 
     try:
         # Step 1: Snapshot clipboard before triggering
