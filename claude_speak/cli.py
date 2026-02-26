@@ -9,10 +9,15 @@ Usage:
     claude-speak restart        # Restart daemon
     claude-speak test "text"    # Speak text immediately (no daemon needed)
     claude-speak say "text"     # Alias for test
+    claude-speak speak "text"   # Send text to daemon via socket
     claude-speak voices         # List available TTS voices
     claude-speak stt-models     # List available Whisper STT models
     claude-speak enable         # Enable voice output
     claude-speak disable        # Disable voice output (daemon stays loaded)
+    claude-speak pause          # Pause TTS (mute)
+    claude-speak resume         # Resume TTS (unmute)
+    claude-speak volume <0.1-1.0>  # Set TTS volume
+    claude-speak speed <value>  # Set TTS speed
     claude-speak clear          # Clear the TTS queue
     claude-speak log            # Show recent daemon log
     claude-speak config         # Print current config values
@@ -39,8 +44,21 @@ from collections.abc import Callable
 from . import queue as Q
 from .config import LOG_FILE, TOGGLE_FILE, load_config
 from .daemon import START_TS_FILE, kill_all, start, status, stop_daemon
+from .ipc import send_message
 from .normalizer import chunk_text, normalize
 from .tts import TTSEngine
+
+
+# ---------------------------------------------------------------------------
+# Socket helper
+# ---------------------------------------------------------------------------
+
+def _send_ipc(msg: dict) -> dict | None:
+    """Send a message to the daemon via the IPC socket.
+
+    Returns the response dict, or None if the socket is unavailable.
+    """
+    return send_message(msg)
 
 
 def cmd_start() -> None:
@@ -48,6 +66,12 @@ def cmd_start() -> None:
 
 
 def cmd_stop() -> None:
+    """Stop the daemon. Try socket first, fall back to PID-based stop."""
+    resp = _send_ipc({"type": "stop"})
+    if resp and resp.get("ok"):
+        print("[daemon] Stop command sent via socket.")
+        return
+    # Fall back to PID-based approach
     stop_daemon()
 
 
@@ -62,28 +86,36 @@ def cmd_restart() -> None:
 
 
 def cmd_status() -> None:
-    status()
+    """Show daemon status. Try socket first, fall back to PID-based status."""
+    resp = _send_ipc({"type": "status"})
+    if resp and resp.get("ok"):
+        # Socket-based status (richer info from running daemon)
+        enabled = resp.get("enabled", False)
+        queue_depth = resp.get("queue_depth", 0)
+        uptime = resp.get("uptime", 0.0)
+
+        print(f"Daemon:  running (via socket)")
+        print(f"Enabled: {'yes' if enabled else 'no'}")
+        print(f"Queue:   {queue_depth} items")
+
+        # Format uptime
+        hours, remainder = divmod(int(uptime), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours > 0:
+            uptime_str = f"{hours}h {minutes}m {seconds}s"
+        elif minutes > 0:
+            uptime_str = f"{minutes}m {seconds}s"
+        else:
+            uptime_str = f"{seconds}s"
+        print(f"Uptime:  {uptime_str}")
+    else:
+        # Fall back to PID-based status
+        status()
+
     config = load_config()
     print(f"Voice:   {config.tts.voice}")
     print(f"Speed:   {config.tts.speed}")
     print(f"Device:  {config.tts.device}")
-
-    # Uptime
-    if START_TS_FILE.exists():
-        try:
-            start_ts = float(START_TS_FILE.read_text().strip())
-            elapsed = time.time() - start_ts
-            hours, remainder = divmod(int(elapsed), 3600)
-            minutes, seconds = divmod(remainder, 60)
-            if hours > 0:
-                uptime_str = f"{hours}h {minutes}m {seconds}s"
-            elif minutes > 0:
-                uptime_str = f"{minutes}m {seconds}s"
-            else:
-                uptime_str = f"{seconds}s"
-            print(f"Uptime:  {uptime_str}")
-        except (ValueError, OSError):
-            pass
 
     # Log file
     print(f"Log:     {LOG_FILE}")
@@ -100,6 +132,88 @@ def cmd_status() -> None:
 
     # Toggle file
     print(f"Toggle:  {TOGGLE_FILE}")
+
+
+def cmd_speak(text: str) -> None:
+    """Send text to the daemon for speaking via socket."""
+    resp = _send_ipc({"type": "speak", "text": text})
+    if resp and resp.get("ok"):
+        print("Text sent to daemon.")
+    elif resp:
+        print(f"Error: {resp.get('error', 'unknown error')}")
+    else:
+        # Fall back to file-based queue
+        print("Socket unavailable, falling back to file queue.")
+        normalized = normalize(text)
+        if not normalized:
+            print("Nothing to speak after normalization.")
+            return
+        config = load_config()
+        chunks = chunk_text(normalized, max_chars=config.tts.max_chunk_chars)
+        paths = Q.enqueue_chunks(chunks)
+        print(f"Queued {len(paths)} chunk(s).")
+
+
+def cmd_pause() -> None:
+    """Pause TTS (mute). Try socket, fall back to creating MUTE_FILE."""
+    from .config import MUTE_FILE
+
+    resp = _send_ipc({"type": "pause"})
+    if resp and resp.get("ok"):
+        print("TTS paused.")
+    else:
+        # Fall back to direct file manipulation
+        MUTE_FILE.touch()
+        print("TTS paused (via file fallback).")
+
+
+def cmd_resume() -> None:
+    """Resume TTS (unmute). Try socket, fall back to removing MUTE_FILE."""
+    from .config import MUTE_FILE
+
+    resp = _send_ipc({"type": "resume"})
+    if resp and resp.get("ok"):
+        print("TTS resumed.")
+    else:
+        # Fall back to direct file manipulation
+        MUTE_FILE.unlink(missing_ok=True)
+        print("TTS resumed (via file fallback).")
+
+
+def cmd_volume(level: str) -> None:
+    """Set TTS volume (0.1-1.0)."""
+    try:
+        volume = float(level)
+    except ValueError:
+        print(f"Error: invalid volume value: {level!r}")
+        sys.exit(1)
+
+    resp = _send_ipc({"type": "set_volume", "volume": volume})
+    if resp and resp.get("ok"):
+        print(f"Volume set to {resp['volume']}.")
+    elif resp:
+        print(f"Error: {resp.get('error', 'unknown error')}")
+    else:
+        print("Socket unavailable. Daemon is not running.")
+        sys.exit(1)
+
+
+def cmd_speed(level: str) -> None:
+    """Set TTS speed."""
+    try:
+        speed = float(level)
+    except ValueError:
+        print(f"Error: invalid speed value: {level!r}")
+        sys.exit(1)
+
+    resp = _send_ipc({"type": "set_speed", "speed": speed})
+    if resp and resp.get("ok"):
+        print(f"Speed set to {resp['speed']}.")
+    elif resp:
+        print(f"Error: {resp.get('error', 'unknown error')}")
+    else:
+        print("Socket unavailable. Daemon is not running.")
+        sys.exit(1)
 
 
 def cmd_test(text: str) -> None:
@@ -328,6 +442,8 @@ def main() -> None:
         "voices": cmd_voices,
         "enable": cmd_enable,
         "disable": cmd_disable,
+        "pause": cmd_pause,
+        "resume": cmd_resume,
         "clear": cmd_clear,
         "log": cmd_log,
         "config": cmd_config,
@@ -343,9 +459,25 @@ def main() -> None:
     elif cmd in ("test", "say"):
         text = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else "Hello, this is a test of claude speak."
         cmd_test(text)
+    elif cmd == "speak":
+        text = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else ""
+        if not text:
+            print("Usage: claude-speak speak <text>")
+            sys.exit(1)
+        cmd_speak(text)
     elif cmd == "queue":
         text = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else ""
         cmd_queue(text)
+    elif cmd == "volume":
+        if len(sys.argv) < 3:
+            print("Usage: claude-speak volume <0.1-1.0>")
+            sys.exit(1)
+        cmd_volume(sys.argv[2])
+    elif cmd == "speed":
+        if len(sys.argv) < 3:
+            print("Usage: claude-speak speed <value>")
+            sys.exit(1)
+        cmd_speed(sys.argv[2])
     elif cmd == "preview":
         voice_arg = sys.argv[2] if len(sys.argv) > 2 else "--all"
         cmd_preview(voice_arg)
