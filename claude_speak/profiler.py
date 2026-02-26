@@ -7,7 +7,6 @@ produces latency statistics (P50, P95, P99) in human-readable and JSON formats.
 
 from __future__ import annotations
 
-import json
 import math
 import time
 from dataclasses import dataclass, field
@@ -15,7 +14,6 @@ from typing import Any
 
 from .normalizer import chunk_text, normalize
 from .tts import TTSEngine
-
 
 # ---------------------------------------------------------------------------
 # Representative benchmark texts
@@ -176,7 +174,7 @@ class BenchmarkReport:
             key=lambda kv: stage_order.index(kv[0]) if kv[0] in stage_order else 99,
         )
 
-        for name, stats in sorted_stages:
+        for _name, stats in sorted_stages:
             row = (
                 f"{stats.stage:<16s} {stats.count:>6d} "
                 f"{_fmt_ms(stats.min_ms):>10s} {_fmt_ms(stats.p50_ms):>10s} "

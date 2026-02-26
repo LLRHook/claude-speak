@@ -22,7 +22,6 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Constants (mirror the shell script defaults)
@@ -72,7 +71,7 @@ class HookInput:
 # JSON parsing
 # ---------------------------------------------------------------------------
 
-def parse_hook_input(raw: str) -> Optional[HookInput]:
+def parse_hook_input(raw: str) -> HookInput | None:
     """Parse the JSON blob that Claude Code pipes to the hook on stdin.
 
     Returns None (rather than raising) on any parse failure — the hook must
@@ -184,7 +183,7 @@ def extract_assistant_text(transcript_path: str, skip_lines: int) -> tuple[str, 
         there is no new assistant content.
     """
     try:
-        with open(transcript_path, "r", encoding="utf-8") as fh:
+        with open(transcript_path, encoding="utf-8") as fh:
             all_lines = fh.readlines()
     except OSError as exc:
         _debug(f"Could not read transcript: {exc}")
@@ -263,7 +262,7 @@ def strip_markdown(text: str) -> str:
 # Queue + daemon signalling
 # ---------------------------------------------------------------------------
 
-def enqueue_text(text: str, queue_dir: Path = QUEUE_DIR) -> Optional[Path]:
+def enqueue_text(text: str, queue_dir: Path = QUEUE_DIR) -> Path | None:
     """Write *text* into the daemon queue directory.
 
     Returns the written file path, or None on failure.
@@ -322,7 +321,7 @@ def send_to_daemon(text: str) -> bool:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def run(stdin_data: Optional[str] = None) -> int:
+def run(stdin_data: str | None = None) -> int:
     """Execute the hook logic.  Always returns 0 (success).
 
     Args:
@@ -345,7 +344,7 @@ def run(stdin_data: Optional[str] = None) -> int:
         _release_lock(HOOK_LOCK)
 
 
-def _run_locked(stdin_data: Optional[str], t_start: float) -> int:
+def _run_locked(stdin_data: str | None, t_start: float) -> int:
     """Core logic executed while holding the hook lock."""
 
     # --- Read stdin ---

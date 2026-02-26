@@ -62,7 +62,7 @@ ENGLISH_PREFIXES = ("af_", "am_", "bf_", "bm_", "ef_", "em_")
 def generate_clips():
     from kokoro_onnx import Kokoro
 
-    print(f"Loading Kokoro model...", flush=True)
+    print("Loading Kokoro model...", flush=True)
     kokoro = Kokoro(
         str(MODELS_DIR / "kokoro-v1.0.onnx"),
         str(MODELS_DIR / "voices-v1.0.bin"),

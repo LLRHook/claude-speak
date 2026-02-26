@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator
 
 import numpy as np
 
@@ -124,11 +124,11 @@ class ElevenLabsBackend(TTSBackend):
         try:
             from elevenlabs import ElevenLabs
             from elevenlabs.client import AsyncElevenLabs
-        except ImportError:
+        except ImportError as exc:
             raise RuntimeError(
                 "elevenlabs package is not installed. "
                 "Install it with: pip install elevenlabs"
-            )
+            ) from exc
 
         self._client = ElevenLabs(api_key=self._api_key)
         self._async_client = AsyncElevenLabs(api_key=self._api_key)
@@ -225,6 +225,6 @@ class ElevenLabsBackend(TTSBackend):
         return self._client is not None
 
     @property
-    def name(self) -> str:  # noqa: D401
+    def name(self) -> str:
         """Human-readable engine name."""
         return "elevenlabs"

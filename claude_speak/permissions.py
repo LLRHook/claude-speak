@@ -14,7 +14,6 @@ from __future__ import annotations
 import platform
 import subprocess
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -24,7 +23,7 @@ class CheckResult:
     name: str
     passed: bool
     detail: str  # e.g. device name on success, error hint on failure
-    hint: Optional[str] = None  # actionable fix instruction
+    hint: str | None = None  # actionable fix instruction
 
 
 def _is_macos() -> bool:
@@ -40,7 +39,7 @@ def check_audio_output() -> CheckResult:
     try:
         import sounddevice as sd
 
-        devices = sd.query_devices()
+        sd.query_devices()  # verify device enumeration works
         default_output = sd.query_devices(kind="output")
         name = default_output.get("name", "unknown") if isinstance(default_output, dict) else "unknown"
         return CheckResult(

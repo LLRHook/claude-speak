@@ -71,10 +71,7 @@ class TestMediaKeyHandlerInit:
         with patch.dict(sys.modules, {"Quartz": None}):
             # We need to reimport to trigger the ImportError path in __init__
             # Use a fresh import by removing the cached module
-            if "claude_speak.media_keys" in sys.modules:
-                saved = sys.modules.pop("claude_speak.media_keys")
-            else:
-                saved = None
+            saved = sys.modules.pop("claude_speak.media_keys") if "claude_speak.media_keys" in sys.modules else None
             try:
                 # Force reimport with Quartz missing
                 import importlib

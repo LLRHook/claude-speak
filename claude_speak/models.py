@@ -255,7 +255,7 @@ def ensure_stt_model(model_size: str = "base") -> str:
     hf_repo = STT_MODEL_REGISTRY[model_size]["hf_repo"]
 
     try:
-        import mlx_whisper  # noqa: F401
+        import mlx_whisper
     except ImportError:
         log.warning(
             "mlx_whisper is not installed; skipping STT model pre-download. "

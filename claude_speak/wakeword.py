@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from .audio_devices import get_device_manager
 from .config import AudioConfig, WakeWordConfig
@@ -130,14 +130,14 @@ class WakeWordListener:
 
     def __init__(
         self,
-        config: Optional[WakeWordConfig] = None,
-        audio_config: Optional[AudioConfig] = None,
+        config: WakeWordConfig | None = None,
+        audio_config: AudioConfig | None = None,
     ) -> None:
         self._config = config or WakeWordConfig()
         self._audio_config = audio_config or AudioConfig()
         self._wake_callbacks: list[Callable[[], None]] = []
         self._stop_phrase_callbacks: list[Callable[[str], None]] = []
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
 
         # Threading events — replace plain booleans for cross-thread safety.
         # See class docstring for full thread-safety analysis.
@@ -151,8 +151,8 @@ class WakeWordListener:
         self._bt_always_builtin: bool = False
 
         self._model = None
-        self._stop_model_name: Optional[str] = None  # key in prediction dict
-        self._builtin_mic_id: Optional[int] = None
+        self._stop_model_name: str | None = None  # key in prediction dict
+        self._builtin_mic_id: int | None = None
 
         # Cooldown to prevent rapid-fire detections (listener thread only)
         self._last_wake_time: float = 0.0
@@ -357,14 +357,13 @@ class WakeWordListener:
         # Check stop model FIRST (priority over wake word)
         if self._stop_model_name and self._stop_model_name in prediction:
             score = prediction[self._stop_model_name]
-            if score >= self._config.stop_sensitivity:
-                if now - self._last_stop_time >= self._cooldown_seconds:
-                    self._last_stop_time = now
-                    self._last_wake_time = now  # suppress wake for this frame
-                    logger.info("Stop detected: %s (score=%.3f)", self._stop_model_name, score)
-                    self._model.reset()
-                    self._fire_stop_phrase_callbacks("stop")
-                    return  # stop wins — skip wake word check
+            if score >= self._config.stop_sensitivity and now - self._last_stop_time >= self._cooldown_seconds:
+                self._last_stop_time = now
+                self._last_wake_time = now  # suppress wake for this frame
+                logger.info("Stop detected: %s (score=%.3f)", self._stop_model_name, score)
+                self._model.reset()
+                self._fire_stop_phrase_callbacks("stop")
+                return  # stop wins — skip wake word check
 
         # Check wake word models
         for model_name, score in prediction.items():

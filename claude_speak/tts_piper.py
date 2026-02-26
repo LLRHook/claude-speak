@@ -10,12 +10,9 @@ in ~/.claude-speak/models/piper/.
 
 from __future__ import annotations
 
-import io
 import logging
-import struct
-import wave
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator
 
 import numpy as np
 
@@ -53,11 +50,11 @@ class PiperBackend(TTSBackend):
         """
         try:
             from piper import PiperVoice
-        except ImportError:
+        except ImportError as exc:
             raise ImportError(
                 "piper-tts is not installed. "
                 "Install it with: pip install 'claude-speak[piper]'"
-            )
+            ) from exc
 
         voice_name = self.config.tts.voice
 
@@ -138,7 +135,7 @@ class PiperBackend(TTSBackend):
         return self._voice is not None
 
     @property
-    def name(self) -> str:  # noqa: D401
+    def name(self) -> str:
         """Human-readable engine name."""
         return "piper"
 

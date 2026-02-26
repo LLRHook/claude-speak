@@ -1020,7 +1020,8 @@ def test_pron_custom_file_overrides_default(tmp_path, monkeypatch):
 def test_pron_whole_word_only(monkeypatch):
     """Replacements must be whole-word — partial matches must not fire."""
     custom_toml = '[terms]\nfoo = "REPLACED"\n'
-    import tempfile, pathlib
+    import tempfile
+    import pathlib
     with tempfile.NamedTemporaryFile(suffix=".toml", delete=False, mode="wb") as fh:
         fh.write(custom_toml.encode())
         tmp_path = pathlib.Path(fh.name)

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import numpy as np
 
@@ -16,7 +16,9 @@ class TTSBackend(ABC):
         ...
 
     @abstractmethod
-    async def generate(self, text: str, voice: str, speed: float = 1.0, lang: str = "en-us") -> AsyncIterator[tuple[np.ndarray, int]]:
+    async def generate(
+        self, text: str, voice: str, speed: float = 1.0, lang: str = "en-us",
+    ) -> AsyncIterator[tuple[np.ndarray, int]]:
         """Generate audio segments from text. Yields (samples, sample_rate) tuples."""
         ...
 

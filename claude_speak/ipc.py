@@ -22,9 +22,8 @@ import os
 import selectors
 import socket
 import threading
-import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +210,7 @@ class IPCServer:
                     # Socket closed from another thread
                     break
 
-                for key, _ in events:
+                for _key, _ in events:
                     srv = self._server_sock
                     if srv is None:
                         break

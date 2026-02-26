@@ -17,14 +17,24 @@ import sys
 import time
 from pathlib import Path
 
+from . import queue as Q
 from .audio_devices import get_device_manager
-from .config import Config, CONFIG_PATH, PID_FILE, TOGGLE_FILE, MUTE_FILE, PLAYING_FILE, LOG_FILE, QUEUE_DIR, load_config
+from .chimes import play_ready_chime, play_stop_chime
+from .config import (
+    CONFIG_PATH,
+    LOG_FILE,
+    MUTE_FILE,
+    PID_FILE,
+    PLAYING_FILE,
+    QUEUE_DIR,
+    TOGGLE_FILE,
+    Config,
+    load_config,
+)
 from .ipc import IPCServer
 from .memmon import get_monitor, init_monitor
-from .normalizer import normalize, chunk_text
+from .normalizer import chunk_text, normalize
 from .tts import TTSEngine, create_backend
-from .chimes import play_ready_chime, play_error_chime, play_stop_chime
-from . import queue as Q
 
 logger = logging.getLogger(__name__)
 
@@ -340,7 +350,7 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
             queue_ready.clear()
             try:
                 await asyncio.wait_for(queue_ready.wait(), timeout=POLL_INTERVAL)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             continue
 
@@ -406,9 +416,8 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
             # Swap to built-in mic during TTS to avoid BT profile switching on AirPods.
             # Skip when the BT workaround is already active: the listener is already on
             # the built-in mic for the entire session, so no swap is needed.
-            if voice_controller and voice_controller._wakeword_listener:
-                if not voice_controller.bt_workaround_active:
-                    voice_controller._wakeword_listener.use_builtin_mic()
+            if voice_controller and voice_controller._wakeword_listener and not voice_controller.bt_workaround_active:
+                voice_controller._wakeword_listener.use_builtin_mic()
 
             try:
                 if len(chunks) == 1:
@@ -456,9 +465,9 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
                 # Swap back to default mic after TTS finishes.
                 # Skip when the BT workaround is active: the built-in mic
                 # stays in use for the entire session; no swap-back needed.
-                if voice_controller and voice_controller._wakeword_listener:
-                    if not voice_controller.bt_workaround_active:
-                        voice_controller._wakeword_listener.use_default_mic()
+                vc = voice_controller
+                if vc and vc._wakeword_listener and not vc.bt_workaround_active:
+                    vc._wakeword_listener.use_default_mic()
 
             # Store the original text for "repeat" command
             global _last_spoken_text
@@ -505,7 +514,7 @@ def acquire_lock() -> bool:
         lock_fd.flush()
         os.chmod(LOCK_FILE, 0o600)
         return True
-    except (OSError, IOError):
+    except OSError:
         return False
 
 

@@ -8,8 +8,6 @@ The model is auto-downloaded on first use to ~/.claude-speak/models/.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import onnxruntime as ort
@@ -122,7 +120,7 @@ class SileroVAD:
 # Singleton accessor
 # ---------------------------------------------------------------------------
 
-_vad_instance: Optional[SileroVAD] = None
+_vad_instance: SileroVAD | None = None
 
 
 def get_vad(threshold: float = 0.5) -> SileroVAD:

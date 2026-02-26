@@ -9,14 +9,14 @@ import logging
 import sys
 import threading
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator
 
 import numpy as np
 
 from .audio_devices import get_device_manager
 from .config import Config
-from .ssml import SpeechSegment, generate_silence, parse_ssml
+from .ssml import generate_silence, parse_ssml
 from .tts_base import TTSBackend
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ class KokoroBackend(TTSBackend):
         if not Path(model_path).exists() or not Path(voices_path).exists():
             logger.info("Models not found locally, downloading...")
             try:
-                from .models import ensure_models, MODELS_DIR
+                from .models import MODELS_DIR, ensure_models
                 paths = ensure_models()
                 # Point config paths at the freshly downloaded files
                 self.config.tts.model_path = str(paths["kokoro-v1.0.onnx"])
@@ -105,7 +105,9 @@ class KokoroBackend(TTSBackend):
         self._kokoro = Kokoro(model_path, voices_path)
         self._voice_style = self._resolve_voice()
 
-    async def generate(self, text: str, voice: str, speed: float = 1.0, lang: str = "en-us") -> AsyncIterator[tuple[np.ndarray, int]]:
+    async def generate(
+        self, text: str, voice: str, speed: float = 1.0, lang: str = "en-us",
+    ) -> AsyncIterator[tuple[np.ndarray, int]]:
         """Generate audio segments from *text* using the Kokoro streaming API.
 
         The *voice* parameter is accepted for interface compliance but the
@@ -130,7 +132,7 @@ class KokoroBackend(TTSBackend):
         return self._kokoro is not None
 
     @property
-    def name(self) -> str:  # noqa: D401
+    def name(self) -> str:
         """Human-readable engine name."""
         return "kokoro"
 
@@ -185,10 +187,7 @@ class KokoroBackend(TTSBackend):
 
         for name, weight in parts:
             style = self._kokoro.get_voice_style(name)
-            if blend is None:
-                blend = style * weight
-            else:
-                blend = np.add(blend, style * weight)
+            blend = style * weight if blend is None else np.add(blend, style * weight)
 
         names = " + ".join(f"{n} ({w*100:.0f}%)" for n, w in parts)
         logger.info("Voice blend: %s", names)

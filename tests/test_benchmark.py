@@ -923,7 +923,7 @@ class TestROCCurve:
         from benchmark import generate_roc_curve
 
         try:
-            import matplotlib  # noqa: F401
+            import matplotlib
         except ImportError:
             pytest.skip("matplotlib not installed")
 
