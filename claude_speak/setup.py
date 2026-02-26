@@ -18,7 +18,7 @@ from .config import (
     TOGGLE_FILE,
     load_config,
 )
-from .models import ensure_models
+from .models import ensure_models, ensure_stt_model, list_stt_models
 
 
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
@@ -48,9 +48,38 @@ def _step_download_models() -> bool:
         return False
 
 
+def _step_download_stt_model() -> bool:
+    """Optionally pre-download a Whisper STT model (skipped by default)."""
+    print("\n2. STT model (optional)...")
+    registry = list_stt_models()
+    print("  Available Whisper models:")
+    for size, info in registry.items():
+        print(f"    {size:8s}  {info['size_hint']}")
+    print()
+    try:
+        answer = input(
+            "  Pre-download an STT model? "
+            "[tiny/base/small/medium/skip] (default: skip): "
+        ).strip().lower()
+    except EOFError:
+        answer = ""
+
+    if answer not in registry:
+        _print_step("Skipping STT model pre-download", "skip")
+        return True
+
+    try:
+        repo = ensure_stt_model(answer)
+        _print_step(f"STT model '{answer}' ready ({repo})")
+        return True
+    except Exception as e:
+        _print_step(f"Failed to pre-download STT model: {e}", "fail")
+        return False
+
+
 def _step_create_config() -> bool:
     """Copy example config to user config directory if it doesn't exist."""
-    print("\n2. Creating default config...")
+    print("\n3. Creating default config...")
     if USER_CONFIG_PATH.exists():
         _print_step(f"Config already exists at {USER_CONFIG_PATH}", "skip")
         return True
@@ -74,7 +103,7 @@ def _step_create_config() -> bool:
 
 def _step_install_hooks() -> bool:
     """Merge claude-speak hook entries into ~/.claude/settings.json."""
-    print("\n3. Installing Claude Code hooks...")
+    print("\n4. Installing Claude Code hooks...")
 
     hooks_dir = HOOKS_DIR
 
@@ -177,7 +206,7 @@ def _step_install_hooks() -> bool:
 
 def _step_create_toggle() -> bool:
     """Create the toggle file to enable voice output."""
-    print("\n4. Enabling voice output...")
+    print("\n5. Enabling voice output...")
     try:
         TOGGLE_FILE.touch()
         _print_step(f"Created {TOGGLE_FILE}")
@@ -189,7 +218,7 @@ def _step_create_toggle() -> bool:
 
 def _step_test_audio() -> bool:
     """Try to speak a test phrase. Failures are logged but don't fail setup."""
-    print("\n5. Testing audio...")
+    print("\n6. Testing audio...")
     try:
         from .tts import TTSEngine
 
@@ -211,6 +240,7 @@ def run_setup() -> None:
     results: dict[str, bool] = {}
 
     results["models"] = _step_download_models()
+    results["stt_model"] = _step_download_stt_model()
     results["config"] = _step_create_config()
     results["hooks"] = _step_install_hooks()
     results["toggle"] = _step_create_toggle()

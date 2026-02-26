@@ -1,11 +1,14 @@
 """
-Voice input via Superwhisper — trigger dictation and auto-submit to Claude Code.
+Voice input — trigger dictation and auto-submit to Claude Code.
 
-Superwhisper is a macOS app that records speech, transcribes it locally, and
-pastes the result at the cursor position. This module:
-  1. Sends a keyboard shortcut (Option+Space) to activate Superwhisper.
-  2. Waits for transcription to complete (configurable timeout).
-  3. Presses Enter to submit the transcribed text to Claude Code.
+Two modes are supported:
+
+1. **Built-in** (default): Records audio from the mic using sounddevice,
+   detects speech boundaries with Silero VAD, transcribes via an STT backend
+   (mlx-whisper), and pastes the result at the cursor position.
+
+2. **Superwhisper** (legacy): Uses the external Superwhisper macOS app which
+   records speech, transcribes it locally, and pastes via clipboard.
 
 All key simulation is done via macOS `osascript` (AppleScript).
 """
@@ -295,10 +298,6 @@ def voice_input_cycle(
     if config is None:
         config = InputConfig()
 
-    if not config.superwhisper:
-        logger.warning("Superwhisper is disabled in config")
-        return False
-
     # Preflight: check if Superwhisper is running — abort immediately if not
     if not _is_superwhisper_running():
         logger.error(
@@ -351,3 +350,190 @@ def voice_input_cycle(
     except SuperwhisperError as e:
         logger.error("Voice input cycle failed: %s", e)
         return False
+
+
+# ---------------------------------------------------------------------------
+# Built-in voice input (mic → VAD → STT → paste)
+# ---------------------------------------------------------------------------
+
+
+def _set_clipboard(text: str) -> bool:
+    """Write text to the macOS pasteboard via pbcopy.
+
+    Returns True on success, False on error.
+    """
+    try:
+        subprocess.run(
+            ["pbcopy"],
+            input=text.encode("utf-8"),
+            check=True,
+            timeout=2.0,
+        )
+        return True
+    except Exception as e:
+        logger.error("pbcopy failed: %s", e)
+        return False
+
+
+def _paste_at_cursor() -> None:
+    """Press Cmd+V via osascript to paste clipboard contents at cursor."""
+    script = (
+        'tell application "System Events" to keystroke "v" using {command down}'
+    )
+    _run_osascript(script)
+
+
+def builtin_voice_input_cycle(config: Optional[InputConfig] = None) -> bool:
+    """Built-in voice input: mic -> VAD -> STT -> paste -> submit.
+
+    Records audio from the default input device, uses Silero VAD to detect
+    speech boundaries, transcribes with the configured STT backend, and
+    pastes the result at the cursor position.
+
+    Args:
+        config: InputConfig with STT backend, model, and auto_submit settings.
+            If None, uses defaults.
+
+    Returns:
+        True if the cycle completed successfully, False on timeout or error.
+    """
+    import numpy as np
+
+    try:
+        import sounddevice as sd
+    except ImportError:
+        logger.error(
+            "sounddevice is not installed — built-in voice input unavailable. "
+            "Install it with: pip install sounddevice"
+        )
+        return False
+
+    if config is None:
+        config = InputConfig()
+
+    # --- Initialise STT recognizer ---
+    try:
+        from .stt import get_recognizer
+
+        recognizer = get_recognizer(
+            backend=config.stt_backend,
+            model=config.stt_model,
+        )
+    except Exception as e:
+        logger.error("STT backend not available: %s", e)
+        return False
+
+    # --- Initialise VAD ---
+    try:
+        from .vad import SileroVAD
+
+        vad = SileroVAD(threshold=config.vad_threshold)
+    except Exception as e:
+        logger.error("VAD initialisation failed: %s", e)
+        return False
+
+    # --- Recording parameters ---
+    sample_rate = 16000
+    # Silero VAD expects 512-sample chunks at 16 kHz (32 ms)
+    vad_chunk_size = 512
+    speech_timeout = 10.0  # max seconds to wait for speech to start
+    silence_frame_limit = 30  # consecutive non-speech frames (~1s at 32ms/frame)
+
+    frames: list[np.ndarray] = []
+    speech_started = False
+    consecutive_silence = 0
+    recording_start = time.monotonic()
+
+    logger.info("Recording started — waiting for speech (timeout=%.0fs)", speech_timeout)
+
+    try:
+        with sd.InputStream(
+            samplerate=sample_rate,
+            channels=1,
+            dtype="int16",
+            blocksize=vad_chunk_size,
+        ) as stream:
+            while True:
+                data, _ = stream.read(vad_chunk_size)
+                # Convert int16 -> float32 for VAD
+                chunk_f32 = data.flatten().astype(np.float32) / 32768.0
+                is_speech = vad.is_speech(chunk_f32)
+
+                if not speech_started:
+                    # Waiting for speech to begin
+                    if is_speech:
+                        speech_started = True
+                        consecutive_silence = 0
+                        frames.append(data.copy())
+                        logger.info("Speech detected")
+                    elif time.monotonic() - recording_start > speech_timeout:
+                        logger.warning(
+                            "No speech detected within %.0fs — aborting",
+                            speech_timeout,
+                        )
+                        return False
+                else:
+                    # Recording speech — collect all frames
+                    frames.append(data.copy())
+                    if is_speech:
+                        consecutive_silence = 0
+                    else:
+                        consecutive_silence += 1
+                        if consecutive_silence >= silence_frame_limit:
+                            duration = (
+                                sum(f.shape[0] for f in frames) / sample_rate
+                            )
+                            logger.info(
+                                "Silence detected (%.1fs of audio)", duration
+                            )
+                            break
+
+    except Exception as e:
+        logger.error("Mic recording error: %s", e)
+        return False
+
+    if not frames:
+        logger.warning("No audio frames captured")
+        return False
+
+    # --- Concatenate and convert audio ---
+    audio_int16 = np.concatenate([f.flatten() for f in frames])
+    audio_f32 = audio_int16.astype(np.float32) / 32768.0
+
+    # --- Transcribe ---
+    t0 = time.monotonic()
+    try:
+        text = recognizer.transcribe(audio_f32, sample_rate=sample_rate)
+    except Exception as e:
+        logger.error("Transcription failed: %s", e)
+        return False
+
+    elapsed_ms = (time.monotonic() - t0) * 1000
+    logger.info("Transcribed: '%s' (%.0fms)", text, elapsed_ms)
+
+    if not text or not text.strip():
+        logger.warning("Empty transcription — skipping")
+        return False
+
+    # --- Paste text at cursor ---
+    if not _set_clipboard(text):
+        return False
+
+    try:
+        _paste_at_cursor()
+    except SuperwhisperError as e:
+        logger.error("Paste failed: %s", e)
+        return False
+
+    # --- Auto-submit ---
+    if config.auto_submit:
+        try:
+            auto_submit()
+            logger.info("Submitted")
+        except SuperwhisperError as e:
+            logger.error("Auto-submit failed: %s", e)
+            return False
+    else:
+        logger.info("Voice input pasted (auto_submit disabled)")
+
+    return True

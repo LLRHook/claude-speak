@@ -113,6 +113,13 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
         if not text:
             continue
 
+        # Skip excessively large queue items (e.g. full transcript dumps from
+        # stale position tracker). 10K chars ~= 2500 words ~= 15 min of speech.
+        MAX_QUEUE_CHARS = 10_000
+        if len(text) > MAX_QUEUE_CHARS:
+            logger.warning("Skipping oversized queue item (%d chars > %d max)", len(text), MAX_QUEUE_CHARS)
+            continue
+
         # Measure time from queue file creation to pickup
         try:
             queue_ts = float(filepath.stem)
@@ -397,19 +404,28 @@ def start(daemonize: bool = False):
     signal.signal(signal.SIGINT, handle_shutdown)
 
     if daemonize:
-        pid = os.fork()
-        if pid > 0:
-            print(f"[daemon] Started (PID {pid})", flush=True)
-            os._exit(0)  # Must use os._exit — sys.exit runs atexit handlers that can kill the child
-        os.setsid()
-
-        # Redirect stdin/stdout/stderr to /dev/null so the daemon survives
-        # after the parent (hook process) exits and closes the original fds.
-        devnull = os.open(os.devnull, os.O_RDWR)
-        os.dup2(devnull, 0)
-        os.dup2(devnull, 1)
-        os.dup2(devnull, 2)
-        os.close(devnull)
+        # Launch daemon as a detached subprocess to avoid fork-related crashes
+        # with C libraries (PortAudio, ONNX Runtime, CoreML).
+        import subprocess as _sp
+        project_root = str(Path(__file__).resolve().parent.parent)
+        env = os.environ.copy()
+        env.setdefault("PYTHONPATH", "")
+        if project_root not in env["PYTHONPATH"]:
+            env["PYTHONPATH"] = project_root + ((":" + env["PYTHONPATH"]) if env["PYTHONPATH"] else "")
+        devnull_fd = os.open(os.devnull, os.O_RDWR)
+        _sp.Popen(
+            [sys.executable, "-m", "claude_speak.daemon"],
+            stdin=devnull_fd,
+            stdout=devnull_fd,
+            stderr=devnull_fd,
+            start_new_session=True,
+            env=env,
+        )
+        os.close(devnull_fd)
+        time.sleep(1.5)
+        daemon_pid = read_pid() or "?"
+        print(f"[daemon] Started (PID {daemon_pid})", flush=True)
+        os._exit(0)
 
     # Configure logging (must happen after fork so the child owns the handlers)
     config_for_log = load_config()

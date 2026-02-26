@@ -19,10 +19,10 @@ from claude_speak.voice_controller import VoiceController
 # ---------------------------------------------------------------------------
 
 def _make_controller(wakeword_enabled=True, chimes=True, auto_submit=True,
-                     tts_stop_callback=None):
+                     tts_stop_callback=None, backend="builtin"):
     config = Config(
         wakeword=WakeWordConfig(enabled=wakeword_enabled),
-        input=InputConfig(auto_submit=auto_submit),
+        input=InputConfig(auto_submit=auto_submit, backend=backend),
         audio=AudioConfig(chimes=chimes),
     )
     return VoiceController(config=config, tts_stop_callback=tts_stop_callback)
@@ -139,13 +139,13 @@ class TestOnWakeWord:
         vc._on_wake_word()
         mock_mute.unlink.assert_called_once_with(missing_ok=True)
 
-    @patch("claude_speak.voice_controller.voice_input_cycle")
+    @patch("claude_speak.voice_controller.builtin_voice_input_cycle")
     @patch("claude_speak.voice_controller.PLAYING_FILE")
-    def test_starts_voice_input_when_idle(self, mock_playing, mock_vic):
+    def test_starts_voice_input_when_idle(self, mock_playing, mock_builtin):
         """If TTS is not playing, wake word should start voice input."""
         mock_playing.exists.return_value = False
-        mock_vic.return_value = True
-        vc = _make_controller()
+        mock_builtin.return_value = True
+        vc = _make_controller(backend="builtin")
         vc._running = True
         vc._wakeword_listener = MagicMock()
         vc._wakeword_listener.is_running = True
@@ -153,7 +153,7 @@ class TestOnWakeWord:
         vc._on_wake_word()
         # Give the thread a moment
         time.sleep(0.2)
-        mock_vic.assert_called_once()
+        mock_builtin.assert_called_once()
 
     def test_does_not_act_when_not_running(self):
         vc = _make_controller()
@@ -172,8 +172,8 @@ class TestHandleWake:
     @patch("claude_speak.voice_controller.play_error_chime")
     @patch("claude_speak.voice_controller.play_ack_chime")
     @patch("claude_speak.voice_controller.voice_input_cycle", return_value=True)
-    def test_successful_cycle(self, mock_vic, mock_ack, mock_err):
-        vc = _make_controller(chimes=True)
+    def test_successful_cycle_superwhisper(self, mock_vic, mock_ack, mock_err):
+        vc = _make_controller(chimes=True, backend="superwhisper")
         vc._running = True
         vc._wakeword_listener = MagicMock()
         vc._wakeword_listener.is_running = True
@@ -186,7 +186,7 @@ class TestHandleWake:
     @patch("claude_speak.voice_controller.play_error_chime")
     @patch("claude_speak.voice_controller.voice_input_cycle", return_value=False)
     def test_failed_cycle_plays_error_chime(self, mock_vic, mock_err):
-        vc = _make_controller(chimes=True)
+        vc = _make_controller(chimes=True, backend="superwhisper")
         vc._running = True
         vc._wakeword_listener = MagicMock()
         vc._wakeword_listener.is_running = True
@@ -197,7 +197,7 @@ class TestHandleWake:
     @patch("claude_speak.voice_controller.voice_input_cycle", return_value=True)
     def test_double_trigger_prevented_by_lock(self, mock_vic):
         """Second concurrent call should return False due to _input_lock."""
-        vc = _make_controller()
+        vc = _make_controller(backend="superwhisper")
         vc._running = True
         vc._wakeword_listener = MagicMock()
         vc._wakeword_listener.is_running = True
@@ -212,7 +212,7 @@ class TestHandleWake:
     @patch("claude_speak.voice_controller.voice_input_cycle", return_value=True)
     def test_wakeword_paused_during_cycle(self, mock_vic):
         """Wake word listener should be paused during voice input."""
-        vc = _make_controller()
+        vc = _make_controller(backend="superwhisper")
         vc._running = True
         mock_ww = MagicMock()
         mock_ww.is_running = True
@@ -231,9 +231,61 @@ class TestTriggerVoiceInput:
 
     @patch("claude_speak.voice_controller.voice_input_cycle", return_value=True)
     def test_trigger_voice_input_delegates_to_handle_wake(self, mock_vic):
-        vc = _make_controller()
+        vc = _make_controller(backend="superwhisper")
         vc._running = True
         vc._wakeword_listener = MagicMock()
         vc._wakeword_listener.is_running = True
         result = vc.trigger_voice_input()
         assert result is True
+
+
+# ---------------------------------------------------------------------------
+# Tests: _choose_voice_input (flow selection)
+# ---------------------------------------------------------------------------
+
+class TestChooseVoiceInput:
+    """Tests for _choose_voice_input — selecting Superwhisper vs built-in."""
+
+    def test_backend_superwhisper_always_returns_superwhisper(self):
+        """backend='superwhisper' always chooses superwhisper, regardless of process state."""
+        config = Config(input=InputConfig(backend="superwhisper"))
+        vc = VoiceController(config=config)
+        assert vc._choose_voice_input() == "superwhisper"
+
+    def test_backend_builtin_always_returns_builtin(self):
+        """backend='builtin' always chooses builtin, regardless of process state."""
+        config = Config(input=InputConfig(backend="builtin"))
+        vc = VoiceController(config=config)
+        assert vc._choose_voice_input() == "builtin"
+
+    @patch("claude_speak.voice_input._is_superwhisper_running", return_value=True)
+    def test_backend_auto_with_superwhisper_running(self, mock_sw):
+        """backend='auto' chooses superwhisper when the process is running."""
+        config = Config(input=InputConfig(backend="auto"))
+        vc = VoiceController(config=config)
+        assert vc._choose_voice_input() == "superwhisper"
+
+    @patch("claude_speak.voice_input._is_superwhisper_running", return_value=False)
+    def test_backend_auto_without_superwhisper_running(self, mock_sw):
+        """backend='auto' falls back to builtin when the process is not running."""
+        config = Config(input=InputConfig(backend="auto"))
+        vc = VoiceController(config=config)
+        assert vc._choose_voice_input() == "builtin"
+
+    def test_default_backend_returns_builtin(self):
+        """Default InputConfig (backend='builtin') always chooses builtin."""
+        vc = _make_controller()
+        assert vc._choose_voice_input() == "builtin"
+
+    @patch("claude_speak.voice_controller.builtin_voice_input_cycle", return_value=True)
+    @patch("claude_speak.voice_controller.play_ack_chime")
+    def test_handle_wake_uses_builtin_when_backend_builtin(self, mock_ack, mock_builtin):
+        """When backend='builtin', _handle_wake uses builtin flow."""
+        vc = _make_controller(chimes=True, backend="builtin")
+        vc._running = True
+        vc._wakeword_listener = MagicMock()
+        vc._wakeword_listener.is_running = True
+        result = vc._handle_wake()
+        assert result is True
+        mock_builtin.assert_called_once()
+        mock_ack.assert_called_once()

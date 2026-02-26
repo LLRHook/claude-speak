@@ -23,5 +23,6 @@ fi
 exec 200>"$LOCK"
 flock -n 200 || exit 0
 
-PYTHONPATH="$PROJECT" python3 -m claude_speak.cli start 2>/dev/null &
+PYTHONPATH="$PROJECT" python3 -m claude_speak.daemon &>/tmp/claude-speak-stderr.log &
+disown
 exit 0

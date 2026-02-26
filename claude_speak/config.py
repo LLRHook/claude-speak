@@ -46,10 +46,13 @@ class WakeWordConfig:
 
 @dataclass
 class InputConfig:
-    superwhisper: bool = True
+    backend: str = "builtin"  # "builtin" (default), "superwhisper", or "auto"
     auto_submit: bool = True
     superwhisper_shortcut_keycode: int = 49  # Space
     superwhisper_shortcut_modifiers: int = 2048  # Option
+    vad_threshold: float = 0.5  # Silero VAD speech probability threshold
+    stt_backend: str = "auto"  # "auto", "mlx", "whisper_cpp"
+    stt_model: str = "base"  # "tiny", "base", "small", "medium"
 
 
 @dataclass
