@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "claude-speak"
+version = "0.1.0"
+description = "Voice interface for Claude Code — hands-free TTS, wake word detection, and voice input"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Victor Ivanov", email = "victor.n.ivanov@gmail.com"},
+]
+
+dependencies = [
+    "kokoro-onnx>=0.4",
+    "sounddevice>=0.4",
+    "numpy>=1.24",
+    "openwakeword>=0.6",
+    "onnxruntime>=1.16",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
+
+[project.scripts]
+claude-speak = "cli:main"

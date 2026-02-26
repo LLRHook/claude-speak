@@ -1,0 +1,79 @@
+# claude-speak configuration
+#
+# Copy this file to claude-speak.toml and adjust to your setup.
+# All sections are optional — defaults are shown below.
+
+[tts]
+# Voice ID for Kokoro TTS.
+# Available voices include: af_sarah, af_bella, af_nicole, am_adam, am_michael, etc.
+# See Kokoro docs for the full list.
+voice = "af_sarah"
+
+# Playback speed multiplier. 1.0 = natural pace, >1.0 = faster.
+# Values between 1.1 and 1.5 work well for conversational output.
+speed = 1.3
+
+# Audio output device selection.
+#   "auto"  — use the system default output device
+#   <name>  — substring match against device names, e.g. "AirPods", "MacBook"
+device = "auto"
+
+# Maximum characters per TTS chunk. Smaller chunks mean the first audio
+# plays sooner; parallel generation of subsequent chunks eliminates gaps.
+# Range: 50-500. Lower = more responsive, higher = fewer synthesis calls.
+max_chunk_chars = 150
+
+[wakeword]
+# Enable or disable wake word detection entirely.
+enabled = true
+
+# Wake word detection engine. Currently only "openwakeword" is supported.
+engine = "openwakeword"
+
+# Wake word model to use.
+#   Built-in options: "hey_jarvis", "hey_mycroft", "alexa", etc.
+#   Custom model path: "wakeword/hey-claude.onnx" (relative to project root)
+model = "hey_jarvis"
+
+# Detection sensitivity from 0.0 (least sensitive) to 1.0 (most sensitive).
+# Lower values reduce false positives; higher values reduce missed detections.
+sensitivity = 0.5
+
+# Phrases that immediately stop TTS playback when detected via voice input.
+stop_phrases = ["stop", "quiet", "shut up"]
+
+[input]
+# Use SuperWhisper for voice-to-text transcription.
+# When true, voice input is routed through the SuperWhisper app (must be installed).
+superwhisper = true
+
+# Automatically submit transcribed text to Claude without waiting for confirmation.
+auto_submit = true
+
+[audio]
+# Play short chime sounds on state changes (e.g. listening, speaking, idle).
+chimes = true
+
+# Text spoken aloud when the daemon starts up. Set to "" to disable.
+greeting = "Ready."
+
+# Volume level for chime sounds, from 0.0 (silent) to 1.0 (full volume).
+# Does not affect TTS voice output volume.
+volume = 0.3
+
+[normalization]
+# Text normalization rules applied before sending text to TTS.
+# These improve spoken output quality by cleaning up code-heavy responses.
+
+# Skip code blocks (```...```) entirely — don't read code aloud.
+skip_code = true
+
+# Expand unit abbreviations: "5ms" -> "5 milliseconds", "10kb" -> "10 kilobytes".
+expand_units = true
+
+# Expand common abbreviations: "e.g." -> "for example", "etc." -> "et cetera".
+expand_abbreviations = true
+
+# Shorten long file paths to just the filename for readability.
+# "/Users/victor/projects/claude-speak/src/tts.py" -> "tts.py"
+shorten_paths = true

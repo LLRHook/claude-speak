@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+._*
+
+# Model files (too large for git)
+*.onnx
+*.bin
+models/
+
+# Runtime
+daemon.log
+*.log
+
+# User config (use claude-speak.toml.example as template)
+claude-speak.toml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Environment
+.env
