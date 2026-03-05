@@ -370,6 +370,7 @@ class TestTapCallback:
 
         return mock_quartz, mock_appkit, data1
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="macOS-only media key handling")
     def test_callback_dispatches_play_on_key_down(self, tmp_path):
         """Play/pause key down triggers toggle_mute callback."""
         mock_quartz, mock_appkit, _ = self._make_handler_and_event(key_code=16, key_state=0x0A)

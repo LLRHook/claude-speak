@@ -63,12 +63,13 @@ class TestFindProcessesByName:
         assert isinstance(result, list)
 
     def test_finds_current_python(self):
-        # Should find at least the current Python process.
-        # On Windows this requires psutil; skip if not installed.
+        # Should find at least one Python process (the test runner itself).
         if sys.platform == "win32":
             pytest.importorskip("psutil")
         result = find_processes_by_name("python")
-        assert os.getpid() in result or len(result) > 0
+        # pgrep may or may not include the current PID depending on how
+        # pytest was invoked; just verify we got some Python processes.
+        assert len(result) > 0
 
     def test_nonexistent_pattern_returns_empty(self):
         result = find_processes_by_name("zzz_nonexistent_process_xyz_12345")
