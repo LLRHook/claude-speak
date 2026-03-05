@@ -322,7 +322,7 @@ class TestGetRecognizer:
         assert recognizer._model_size == "tiny"
 
     def test_auto_backend_raises_when_nothing_available(self):
-        with patch.dict(sys.modules, {"mlx_whisper": None}):
+        with patch.dict(sys.modules, {"mlx_whisper": None, "faster_whisper": None}):
             with pytest.raises(RuntimeError, match="No STT backend available"):
                 get_recognizer(backend="auto")
 

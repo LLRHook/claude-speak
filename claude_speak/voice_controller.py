@@ -327,8 +327,8 @@ class VoiceController:
         if backend == "superwhisper":
             return "superwhisper"
         if backend == "auto":
-            from .voice_input import _is_superwhisper_running
-            if _is_superwhisper_running():
+            from .voice_input import _is_superwhisper_running as is_superwhisper_running
+            if is_superwhisper_running():
                 return "superwhisper"
             return "builtin"
         return "builtin"  # default

@@ -40,8 +40,6 @@ Usage:
 
 from __future__ import annotations
 
-import platform
-import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -333,19 +331,17 @@ def cmd_log() -> None:
         print(f"No log file found at {LOG_FILE}")
         return
     try:
-        result = subprocess.run(
-            ["tail", "-20", str(LOG_FILE)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        print(result.stdout, end="")
+        lines = LOG_FILE.read_text(encoding="utf-8").strip().splitlines()
+        for line in lines[-20:]:
+            print(line)
     except Exception as e:
         print(f"Error reading log: {e}")
 
 
 def cmd_listen() -> None:
     """Start voice controller with wake word detection."""
+    import threading
+
     from .voice_controller import VoiceController
 
     config = load_config()
@@ -353,9 +349,7 @@ def cmd_listen() -> None:
     controller.start()
     print("Voice controller running. Press Ctrl+C to stop.")
     try:
-        import signal
-
-        signal.pause()
+        threading.Event().wait()
     except KeyboardInterrupt:
         controller.stop()
         print("\nVoice controller stopped.")
@@ -533,15 +527,6 @@ def main() -> None:
         # check-permissions works on all platforms (reports N/A for macOS-only checks)
         cmd_check_permissions()
         return
-
-    if platform.system() != "Darwin":
-        print(
-            "claude-speak currently requires macOS for audio output "
-            "(PortAudio/sounddevice) and Superwhisper integration.\n"
-            "Linux support is planned for a future release.\n"
-            "Track progress: https://github.com/vnicivanov/claude-speak/issues"
-        )
-        sys.exit(1)
 
     if len(sys.argv) < 2:
         print(__doc__)

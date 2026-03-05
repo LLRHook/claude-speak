@@ -2,7 +2,9 @@
 Speech-to-text interface and backend implementations.
 
 Provides an abstract SpeechRecognizer base class and concrete backends.
-The default backend is MLX Whisper (Apple Silicon native via Metal GPU).
+Available backends:
+  - MLX Whisper (Apple Silicon native via Metal GPU)
+  - faster-whisper (CTranslate2, cross-platform, CUDA optional)
 """
 
 from __future__ import annotations
@@ -102,11 +104,84 @@ class MLXWhisperRecognizer(SpeechRecognizer):
         return text
 
 
+class FasterWhisperRecognizer(SpeechRecognizer):
+    """faster-whisper backend — CTranslate2-based transcription.
+
+    Works on Windows, Linux, and macOS. Uses CTranslate2 for efficient
+    inference with int8 quantization. Supports CUDA GPU acceleration
+    when available, otherwise falls back to CPU.
+    """
+
+    MODEL_MAP: ClassVar[dict[str, str]] = {
+        "tiny": "tiny",
+        "base": "base",
+        "small": "small",
+        "medium": "medium",
+        "large": "large-v3",
+    }
+
+    def __init__(self, model: str = "base"):
+        self._model_size = model
+        self._model_id = self.MODEL_MAP.get(model, model)
+        self._model = None  # lazy load
+
+    @property
+    def name(self) -> str:
+        return f"faster-whisper ({self._model_size})"
+
+    def is_available(self) -> bool:
+        try:
+            import faster_whisper  # noqa: F401
+
+            return True
+        except ImportError:
+            return False
+
+    def _load_model(self):
+        if self._model is not None:
+            return
+        from faster_whisper import WhisperModel
+
+        # Detect CUDA availability
+        device = "cpu"
+        compute_type = "int8"
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                device = "cuda"
+                compute_type = "float16"
+        except ImportError:
+            pass
+
+        logger.info("Loading faster-whisper model %s on %s (%s)", self._model_id, device, compute_type)
+        self._model = WhisperModel(self._model_id, device=device, compute_type=compute_type)
+
+    def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
+        self._load_model()
+
+        # Ensure float32
+        if audio.dtype != np.float32:
+            audio = audio.astype(np.float32)
+
+        # Resample if needed (faster-whisper expects 16kHz)
+        if sample_rate != 16000:
+            duration = len(audio) / sample_rate
+            target_len = int(duration * 16000)
+            indices = np.linspace(0, len(audio) - 1, target_len)
+            audio = np.interp(indices, np.arange(len(audio)), audio).astype(np.float32)
+
+        segments, _info = self._model.transcribe(audio, language="en", beam_size=5)
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+        logger.debug("Transcribed (%s): '%s'", self.name, text)
+        return text
+
+
 def get_recognizer(backend: str = "auto", model: str = "base") -> SpeechRecognizer:
     """Factory function to get a speech recognizer.
 
     Args:
-        backend: "mlx", "whisper_cpp", or "auto" (tries mlx first)
+        backend: "mlx", "faster_whisper", or "auto" (tries mlx first, then faster-whisper)
         model: model size - "tiny", "base", "small", "medium"
 
     Returns:
@@ -124,5 +199,15 @@ def get_recognizer(backend: str = "auto", model: str = "base") -> SpeechRecogniz
             logger.warning("MLX Whisper not available: %s", e)
         if backend == "mlx":
             raise RuntimeError("MLX Whisper requested but not available")
+
+    if backend in ("auto", "faster_whisper"):
+        try:
+            recognizer = FasterWhisperRecognizer(model=model)
+            if recognizer.is_available():
+                return recognizer
+        except Exception as e:
+            logger.warning("faster-whisper not available: %s", e)
+        if backend == "faster_whisper":
+            raise RuntimeError("faster-whisper requested but not available")
 
     raise RuntimeError(f"No STT backend available (tried: {backend})")

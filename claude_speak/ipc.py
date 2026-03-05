@@ -1,13 +1,16 @@
 """
-Unix domain socket IPC for claude-speak.
+IPC for claude-speak.
 
 Replaces SIGUSR1 signal + file-based queue with a proper IPC protocol.
-Messages are newline-delimited JSON over a Unix domain socket.
+Messages are newline-delimited JSON over a socket.
+
+On macOS/Linux a Unix domain socket is used; on Windows a TCP localhost
+connection is used instead (AF_UNIX is not reliably available).
 
 **Server side** (daemon):
-    IPCServer listens on SOCKET_PATH in a background thread, accepts
-    connections, dispatches messages to registered handlers, and sends
-    JSON acknowledgments back.
+    IPCServer listens on SOCKET_PATH (Unix) or localhost:IPC_PORT (Windows)
+    in a background thread, accepts connections, dispatches messages to
+    registered handlers, and sends JSON acknowledgments back.
 
 **Client side** (hooks / CLI):
     send_message() connects, sends a JSON message, reads the response,
@@ -25,9 +28,28 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
+from .platform import is_windows
+from .platform.paths import ipc_port as _ipc_port
+from .platform.paths import socket_path as _socket_path
+
 logger = logging.getLogger(__name__)
 
-SOCKET_PATH = Path("/tmp/claude-speak.sock")
+SOCKET_PATH = _socket_path()
+IPC_PORT = _ipc_port()
+
+
+def _create_client_socket() -> socket.socket:
+    """Create a client socket appropriate for the current platform."""
+    if is_windows():
+        return socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    return socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+
+
+def _connect_address():
+    """Return the address to connect to for IPC."""
+    if is_windows():
+        return ("127.0.0.1", IPC_PORT)
+    return str(SOCKET_PATH)
 
 # Maximum message size (256 KB should be more than enough)
 _MAX_MSG_SIZE = 256 * 1024
@@ -40,14 +62,21 @@ _MAX_MSG_SIZE = 256 * 1024
 def send_message(msg: dict, timeout: float = 2.0, socket_path: Path = SOCKET_PATH) -> dict | None:
     """Send a JSON message to the daemon and return the response.
 
-    Connects to the Unix domain socket, sends *msg* as JSON + newline,
-    reads the response JSON, and closes.  Returns the parsed response
-    dict, or None on any failure (connection refused, timeout, etc.).
+    Connects to the IPC socket (Unix domain socket on macOS/Linux, TCP on
+    Windows), sends *msg* as JSON + newline, reads the response JSON, and
+    closes.  Returns the parsed response dict, or None on any failure
+    (connection refused, timeout, etc.).
     """
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    # On Unix, honour a custom socket_path if the caller passes one
+    if not is_windows() and socket_path != SOCKET_PATH:
+        addr = str(socket_path)
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    else:
+        addr = _connect_address()
+        sock = _create_client_socket()
     sock.settimeout(timeout)
     try:
-        sock.connect(str(socket_path))
+        sock.connect(addr)
         payload = json.dumps(msg) + "\n"
         sock.sendall(payload.encode("utf-8"))
 
@@ -77,16 +106,21 @@ def send_message(msg: dict, timeout: float = 2.0, socket_path: Path = SOCKET_PAT
 def is_daemon_running(socket_path: Path = SOCKET_PATH) -> bool:
     """Check whether the daemon is reachable via the IPC socket.
 
-    Returns True if the socket file exists AND a connection can be
-    established (the daemon is actually listening).
+    On Unix: returns True if the socket file exists AND a connection can
+    be established.  On Windows: skips the file check (TCP has no file)
+    and just tries to connect.
     """
-    if not socket_path.exists():
-        return False
-
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    if is_windows():
+        addr = _connect_address()
+        sock = _create_client_socket()
+    else:
+        if not socket_path.exists():
+            return False
+        addr = str(socket_path)
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(1.0)
     try:
-        sock.connect(str(socket_path))
+        sock.connect(addr)
         return True
     except (OSError, ConnectionError):
         return False
@@ -104,7 +138,9 @@ MessageHandler = Callable[[dict], dict]
 
 
 class IPCServer:
-    """Non-blocking Unix domain socket server for the daemon.
+    """Non-blocking IPC server for the daemon.
+
+    Uses Unix domain sockets on macOS/Linux and TCP localhost on Windows.
 
     Usage::
 
@@ -118,8 +154,9 @@ class IPCServer:
     the asyncio main loop.
     """
 
-    def __init__(self, socket_path: Path = SOCKET_PATH):
+    def __init__(self, socket_path: Path = SOCKET_PATH, port: int = IPC_PORT):
         self._socket_path = socket_path
+        self._port = port
         self._handlers: dict[str, MessageHandler] = {}
         self._server_sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
@@ -145,11 +182,17 @@ class IPCServer:
         self._stop_event.clear()
         self._cleanup_socket()
 
-        self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._server_sock.bind(str(self._socket_path))
-        # Restrict socket to owner-only access
-        os.chmod(str(self._socket_path), 0o600)
+        if is_windows():
+            self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._server_sock.bind(("127.0.0.1", self._port))
+            bind_info = f"127.0.0.1:{self._port}"
+        else:
+            self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._server_sock.bind(str(self._socket_path))
+            os.chmod(str(self._socket_path), 0o600)
+            bind_info = str(self._socket_path)
         self._server_sock.listen(16)
         self._server_sock.setblocking(False)
 
@@ -159,7 +202,7 @@ class IPCServer:
             daemon=True,
         )
         self._thread.start()
-        logger.info("IPC server started on %s", self._socket_path)
+        logger.info("IPC server started on %s", bind_info)
 
     def stop(self) -> None:
         """Signal the server thread to stop and clean up."""
@@ -183,7 +226,9 @@ class IPCServer:
     # -- internals --
 
     def _cleanup_socket(self) -> None:
-        """Remove the socket file if it exists."""
+        """Remove the socket file if it exists (no-op on Windows, TCP has no file)."""
+        if is_windows():
+            return
         try:
             self._socket_path.unlink(missing_ok=True)
         except OSError:

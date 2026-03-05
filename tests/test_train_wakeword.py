@@ -719,13 +719,10 @@ class TestCliWiring:
              patch("claude_speak.cli.cmd_train_wakeword") as mock_cmd:
             mock_sys.argv = ["claude-speak", "train-wakeword", "hey test"]
             mock_sys.exit = MagicMock(side_effect=SystemExit)
-            # Need platform check to pass
-            with patch("claude_speak.cli.platform") as mock_platform:
-                mock_platform.system.return_value = "Darwin"
-                from claude_speak.cli import main
+            from claude_speak.cli import main
 
-                main()
-                mock_cmd.assert_called_once()
+            main()
+            mock_cmd.assert_called_once()
 
     def test_train_wakeword_in_docstring(self):
         """The CLI docstring should mention train-wakeword."""

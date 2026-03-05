@@ -10,7 +10,8 @@ Two modes are supported:
 2. **Superwhisper** (legacy): Uses the external Superwhisper macOS app which
    records speech, transcribes it locally, and pastes via clipboard.
 
-All key simulation is done via macOS `osascript` (AppleScript).
+Cross-platform clipboard and keyboard helpers are available in
+``claude_speak.platform.input_helpers`` for use by other modules.
 """
 
 from __future__ import annotations
@@ -22,6 +23,63 @@ import time
 from .config import InputConfig
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatibility wrappers (old private names used by tests).
+# Tests patch ``claude_speak.voice_input.subprocess.run`` and
+# ``claude_speak.voice_input._run_osascript`` to control these, so the
+# implementations must live here and reference *this* module's ``subprocess``.
+# ---------------------------------------------------------------------------
+
+
+def _is_superwhisper_running() -> bool:
+    """Check whether Superwhisper is running (legacy wrapper for tests)."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-xiq", "superwhisper"],
+            capture_output=True,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _get_clipboard() -> str:
+    """Read the macOS pasteboard via pbpaste (legacy wrapper for tests)."""
+    try:
+        result = subprocess.run(
+            ["pbpaste"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+        return result.stdout
+    except Exception:
+        return ""
+
+
+def _set_clipboard(text: str) -> bool:
+    """Write text to the macOS pasteboard via pbcopy (legacy wrapper for tests)."""
+    try:
+        subprocess.run(
+            ["pbcopy"],
+            input=text.encode("utf-8"),
+            check=True,
+            timeout=2.0,
+        )
+        return True
+    except Exception as e:
+        logger.error("pbcopy failed: %s", e)
+        return False
+
+
+def _paste_at_cursor() -> None:
+    """Press Cmd+V via osascript (legacy wrapper for tests)."""
+    script = (
+        'tell application "System Events" to keystroke "v" using {command down}'
+    )
+    _run_osascript(script)
 
 
 class SuperwhisperError(Exception):
@@ -62,32 +120,6 @@ def _run_osascript(script: str, timeout: float = 5.0) -> subprocess.CompletedPro
         raise SuperwhisperError(
             f"osascript timed out after {timeout}s"
         ) from exc
-
-
-def _is_superwhisper_running() -> bool:
-    """Check whether the Superwhisper app process is currently running."""
-    try:
-        result = subprocess.run(
-            ["pgrep", "-xiq", "superwhisper"],
-            capture_output=True,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-def _get_clipboard() -> str:
-    """Read the current macOS pasteboard contents."""
-    try:
-        result = subprocess.run(
-            ["pbpaste"],
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-        )
-        return result.stdout
-    except Exception:
-        return ""
 
 
 def trigger_superwhisper(
@@ -146,13 +178,10 @@ def _modifier_flags_to_names(flags: int) -> list[str]:
 
 
 def auto_submit() -> None:
-    """Press Enter to submit the transcribed text in Claude Code.
+    """Press Enter to submit text (legacy wrapper for tests).
 
-    Assumes the cursor is in the Claude Code input area and that
-    Superwhisper has already pasted the transcribed text.
-
-    Raises:
-        SuperwhisperError: If the keystroke cannot be sent.
+    Tests patch ``_run_osascript`` to verify this sends ``keystroke return``,
+    so this wrapper must go through osascript rather than ``press_enter()``.
     """
     script = 'tell application "System Events" to keystroke return'
     logger.info("Auto-submitting (pressing Enter)")
@@ -281,8 +310,8 @@ def voice_input_cycle(
     Flow:
       1. Snapshot the clipboard.
       2. Trigger Superwhisper to start recording (Option+Space).
-      3. Monitor the mic for speech → silence (user finished talking).
-         No hard cutoff — only 3s of silence after speech stops recording.
+      3. Monitor the mic for speech -> silence (user finished talking).
+         No hard cutoff -- only 3s of silence after speech stops recording.
       4. Send Option+Space again to stop Superwhisper recording.
       5. Wait for clipboard to change (transcription pasted).
       6. Only press Enter if new text actually appeared.
@@ -354,32 +383,6 @@ def voice_input_cycle(
 # ---------------------------------------------------------------------------
 # Built-in voice input (mic → VAD → STT → paste)
 # ---------------------------------------------------------------------------
-
-
-def _set_clipboard(text: str) -> bool:
-    """Write text to the macOS pasteboard via pbcopy.
-
-    Returns True on success, False on error.
-    """
-    try:
-        subprocess.run(
-            ["pbcopy"],
-            input=text.encode("utf-8"),
-            check=True,
-            timeout=2.0,
-        )
-        return True
-    except Exception as e:
-        logger.error("pbcopy failed: %s", e)
-        return False
-
-
-def _paste_at_cursor() -> None:
-    """Press Cmd+V via osascript to paste clipboard contents at cursor."""
-    script = (
-        'tell application "System Events" to keystroke "v" using {command down}'
-    )
-    _run_osascript(script)
 
 
 def builtin_voice_input_cycle(config: InputConfig | None = None) -> bool:
@@ -520,7 +523,7 @@ def builtin_voice_input_cycle(config: InputConfig | None = None) -> bool:
 
     try:
         _paste_at_cursor()
-    except SuperwhisperError as e:
+    except Exception as e:
         logger.error("Paste failed: %s", e)
         return False
 
@@ -529,7 +532,7 @@ def builtin_voice_input_cycle(config: InputConfig | None = None) -> bool:
         try:
             auto_submit()
             logger.info("Submitted")
-        except SuperwhisperError as e:
+        except Exception as e:
             logger.error("Auto-submit failed: %s", e)
             return False
     else:

@@ -23,7 +23,6 @@ CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 USER_CONFIG_DIR = Path.home() / ".claude-speak"
 USER_CONFIG_PATH = USER_CONFIG_DIR / "config.toml"
 EXAMPLE_CONFIG_PATH = PROJECT_DIR / "claude-speak.toml.example"
-HOOKS_DIR = PROJECT_DIR / "hooks"
 
 
 def _print_step(label: str, status: str = "ok") -> None:
@@ -103,15 +102,13 @@ def _step_install_hooks() -> bool:
     """Merge claude-speak hook entries into ~/.claude/settings.json."""
     print("\n4. Installing Claude Code hooks...")
 
-    hooks_dir = HOOKS_DIR
-
     # Define the hooks claude-speak needs
     hook_entries = {
         "SessionStart": {
             "hooks": [
                 {
                     "type": "command",
-                    "command": str(hooks_dir / "daemon-start.sh"),
+                    "command": "python3 -m claude_speak.hooks.daemon_start",
                     "async": True,
                 }
             ]
@@ -120,7 +117,7 @@ def _step_install_hooks() -> bool:
             "hooks": [
                 {
                     "type": "command",
-                    "command": str(hooks_dir / "daemon-stop.sh"),
+                    "command": "python3 -m claude_speak.hooks.daemon_stop",
                     "async": True,
                 }
             ]
@@ -129,7 +126,7 @@ def _step_install_hooks() -> bool:
             "hooks": [
                 {
                     "type": "command",
-                    "command": str(hooks_dir / "speak-response.sh"),
+                    "command": "python3 -m claude_speak.hooks.speak_response",
                     "timeout": 30,
                     "async": True,
                 }
@@ -139,7 +136,7 @@ def _step_install_hooks() -> bool:
             "hooks": [
                 {
                     "type": "command",
-                    "command": str(hooks_dir / "daemon-restart.sh"),
+                    "command": "python3 -m claude_speak.hooks.daemon_restart",
                 }
             ]
         },
@@ -170,10 +167,9 @@ def _step_install_hooks() -> bool:
                 for existing_entry in settings["hooks"][event_name]:
                     for hook in existing_entry.get("hooks", []):
                         cmd = hook.get("command", "")
-                        # Match if command points to same script (by filename)
-                        script_name = Path(new_command).name
-                        if script_name in cmd:
-                            # Update the command to use absolute path
+                        # Match if command is a claude-speak hook
+                        if "claude_speak.hooks" in cmd or "claude-speak" in cmd:
+                            # Update the command to current module invocation
                             hook["command"] = new_command
                             already_present = True
                             break
@@ -305,9 +301,10 @@ def uninstall(remove_models: bool = False) -> None:
         _print_step(f"Could not stop daemon (may not be running): {e}", "info")
 
     # 2. Remove individual state files.
-    _POSITION_FILE = Path("/tmp/claude-speak-pos")
-    _HOOK_LOCK_FILE = Path("/tmp/claude-speak-hook.lock")
-    _DAEMON_LOCK_FILE = Path("/tmp/claude-speak-daemon.lock")
+    from .platform.paths import hook_lock, lock_file, pos_file
+    _POSITION_FILE = pos_file()
+    _HOOK_LOCK_FILE = hook_lock()
+    _DAEMON_LOCK_FILE = lock_file()
 
     state_files: list[Path] = [
         TOGGLE_FILE,

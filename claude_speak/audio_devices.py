@@ -134,7 +134,11 @@ class AudioDeviceManager:
         for i, d in enumerate(sd.query_devices()):
             if d["max_input_channels"] > 0:
                 name = d["name"].lower()
-                if any(kw in name for kw in ("macbook", "built-in", "internal")):
+                builtin_keywords = (
+                    "macbook", "built-in", "internal",
+                    "microphone array", "realtek", "integrated",
+                )
+                if any(kw in name for kw in builtin_keywords):
                     return i
         return None
 

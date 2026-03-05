@@ -37,7 +37,12 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 def _get_onnx_providers() -> list[str]:
-    """Return ONNX Runtime execution providers, preferring CoreML on Apple Silicon."""
+    """Return ONNX Runtime execution providers, preferring GPU acceleration.
+
+    - macOS Apple Silicon: CoreMLExecutionProvider
+    - Windows with DirectX 12 GPU: DmlExecutionProvider
+    - Fallback: CPUExecutionProvider
+    """
     import platform
     providers = []
     if platform.machine() == "arm64" and platform.system() == "Darwin":
@@ -46,6 +51,14 @@ def _get_onnx_providers() -> list[str]:
             available = onnxruntime.get_available_providers()
             if "CoreMLExecutionProvider" in available:
                 providers.append("CoreMLExecutionProvider")
+        except ImportError:
+            pass
+    elif platform.system() == "Windows":
+        try:
+            import onnxruntime
+            available = onnxruntime.get_available_providers()
+            if "DmlExecutionProvider" in available:
+                providers.append("DmlExecutionProvider")
         except ImportError:
             pass
     providers.append("CPUExecutionProvider")

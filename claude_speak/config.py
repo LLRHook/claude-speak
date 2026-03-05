@@ -11,17 +11,23 @@ import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .platform.paths import mute_file as _mute_file
+from .platform.paths import pid_file as _pid_file
+from .platform.paths import playing_file as _playing_file
+from .platform.paths import queue_dir as _queue_dir
+
 _config_logger = logging.getLogger(__name__)
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = PROJECT_DIR / "claude-speak.toml"
 MODELS_DIR = Path.home() / ".claude-speak" / "models"
 WAKEWORD_DIR = PROJECT_DIR / "wakeword"
-QUEUE_DIR = Path("/tmp/claude-speak-queue")
-PID_FILE = Path("/tmp/claude-speak-daemon.pid")
+
+QUEUE_DIR = _queue_dir()
+PID_FILE = _pid_file()
 TOGGLE_FILE = Path.home() / ".claude-speak-enabled"
-MUTE_FILE = Path("/tmp/claude-speak-muted")
-PLAYING_FILE = Path("/tmp/claude-speak-playing")
+MUTE_FILE = _mute_file()
+PLAYING_FILE = _playing_file()
 LOG_FILE = PROJECT_DIR / "daemon.log"
 
 
