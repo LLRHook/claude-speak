@@ -278,6 +278,24 @@ class WakeWordListener:
         if self._builtin_mic_id is not None:
             logger.info("Built-in mic: device %d", self._builtin_mic_id)
 
+        # If the user configured a specific mic device, find it by name
+        self._configured_mic_id: int | None = None
+        mic_name = getattr(self._audio_config, "mic_device", "")
+        if mic_name:
+            devices = sd.query_devices()
+            for i, d in enumerate(devices):
+                if d["max_input_channels"] > 0 and mic_name.lower() in d["name"].lower():
+                    self._configured_mic_id = i
+                    logger.info(
+                        "Using configured mic: device %d (%s)",
+                        i, d["name"],
+                    )
+                    break
+            if self._configured_mic_id is None:
+                logger.warning(
+                    "Configured mic_device=%r not found, falling back to default", mic_name
+                )
+
         # Bluetooth workaround: if the default output device is Bluetooth and
         # the workaround is enabled, always use the built-in mic so we never
         # trigger an SCO profile switch.
@@ -305,17 +323,19 @@ class WakeWordListener:
                     time.sleep(0.1)
                     continue
 
-                # Pick device:
-                #   _bt_always_builtin: BT output detected at startup; use
-                #       built-in mic for the entire session to avoid SCO mode.
-                #   _swap_mic_event:    legacy per-TTS swap signal; use
-                #       built-in mic only while the event is set.
-                #   Neither:            use the system default mic (None).
-                use_builtin = (
-                    self._bt_always_builtin
-                    or self._swap_mic_event.is_set()
-                )
-                device = self._builtin_mic_id if use_builtin and self._builtin_mic_id is not None else None
+                # Pick device (priority order):
+                #   1. User-configured mic_device (always wins if set)
+                #   2. _bt_always_builtin: BT output detected; use built-in mic
+                #   3. _swap_mic_event: legacy per-TTS swap signal
+                #   4. System default mic (None)
+                if self._configured_mic_id is not None:
+                    device = self._configured_mic_id
+                else:
+                    use_builtin = (
+                        self._bt_always_builtin
+                        or self._swap_mic_event.is_set()
+                    )
+                    device = self._builtin_mic_id if use_builtin and self._builtin_mic_id is not None else None
 
                 try:
                     with sd.InputStream(
