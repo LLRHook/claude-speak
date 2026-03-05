@@ -517,12 +517,17 @@ def builtin_voice_input_cycle(config: InputConfig | None = None) -> bool:
         logger.warning("Empty transcription — skipping")
         return False
 
-    # --- Paste text at cursor ---
-    if not _set_clipboard(text):
+    # --- Paste text at cursor (cross-platform) ---
+    from .platform.input_helpers import set_clipboard as _xplat_set_clipboard
+    from .platform.input_helpers import paste_at_cursor as _xplat_paste
+    from .platform.input_helpers import press_enter as _xplat_enter
+
+    if not _xplat_set_clipboard(text):
+        logger.error("Failed to copy text to clipboard")
         return False
 
     try:
-        _paste_at_cursor()
+        _xplat_paste()
     except Exception as e:
         logger.error("Paste failed: %s", e)
         return False
@@ -530,7 +535,7 @@ def builtin_voice_input_cycle(config: InputConfig | None = None) -> bool:
     # --- Auto-submit ---
     if config.auto_submit:
         try:
-            auto_submit()
+            _xplat_enter()
             logger.info("Submitted")
         except Exception as e:
             logger.error("Auto-submit failed: %s", e)
