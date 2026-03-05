@@ -386,9 +386,9 @@ class TestBuiltinVoiceInputCycle:
 
         return chunks, vad_responses
 
-    @patch("claude_speak.voice_input.auto_submit")
-    @patch("claude_speak.voice_input._paste_at_cursor")
-    @patch("claude_speak.voice_input._set_clipboard", return_value=True)
+    @patch("claude_speak.platform.input_helpers.press_enter")
+    @patch("claude_speak.platform.input_helpers.paste_at_cursor")
+    @patch("claude_speak.platform.input_helpers.set_clipboard", return_value=True)
     def test_full_success_path(self, mock_clipboard, mock_paste, mock_submit):
         """Speech detected -> transcription -> paste -> submit."""
         chunks, vad_responses = self._make_speech_chunks(n_speech=5, n_silence=30)
@@ -416,9 +416,9 @@ class TestBuiltinVoiceInputCycle:
         mock_paste.assert_called_once()
         mock_submit.assert_called_once()
 
-    @patch("claude_speak.voice_input.auto_submit")
-    @patch("claude_speak.voice_input._paste_at_cursor")
-    @patch("claude_speak.voice_input._set_clipboard", return_value=True)
+    @patch("claude_speak.platform.input_helpers.press_enter")
+    @patch("claude_speak.platform.input_helpers.paste_at_cursor")
+    @patch("claude_speak.platform.input_helpers.set_clipboard", return_value=True)
     def test_auto_submit_disabled(self, mock_clipboard, mock_paste, mock_submit):
         """When auto_submit=False, text is pasted but Enter is not pressed."""
         chunks, vad_responses = self._make_speech_chunks(n_speech=3, n_silence=30)

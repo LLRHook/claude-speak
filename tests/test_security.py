@@ -69,11 +69,22 @@ import json
 import os
 import socket
 import stat
+import sys
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
 import pytest
+
+# Skip markers for platform-specific tests
+_skip_windows_perms = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file permissions (chmod 0o600/0o700) not enforced on Windows",
+)
+_skip_windows_unix_socket = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="AF_UNIX sockets not reliably available on Windows",
+)
 
 
 # =========================================================================
@@ -81,6 +92,7 @@ import pytest
 # =========================================================================
 
 
+@_skip_windows_perms
 class TestDaemonFilePermissions:
     """Verify that daemon runtime files are created with restrictive permissions."""
 
@@ -106,6 +118,7 @@ class TestDaemonFilePermissions:
         assert mode == 0o600, f"Expected 0o600, got {oct(mode)}"
 
 
+@_skip_windows_perms
 class TestQueueFilePermissions:
     """Verify that queue directory and files have restrictive permissions."""
 
@@ -140,6 +153,7 @@ class TestQueueFilePermissions:
             assert mode == 0o600, f"Expected 0o600 for {p}, got {oct(mode)}"
 
 
+@_skip_windows_perms
 class TestHookQueuePermissions:
     """Verify that the Python hook sets restrictive permissions on queue files."""
 
@@ -162,6 +176,7 @@ class TestHookQueuePermissions:
 # =========================================================================
 
 
+@_skip_windows_unix_socket
 class TestIPCSocketPermissions:
     """Verify that the IPC socket has restrictive permissions."""
 
@@ -193,6 +208,7 @@ class TestIPCSocketPermissions:
 # =========================================================================
 
 
+@_skip_windows_unix_socket
 class TestIPCMessageValidation:
     """Verify that the IPC server validates message fields."""
 
@@ -372,6 +388,7 @@ class TestCLIConfigMasking:
 # =========================================================================
 
 
+@_skip_windows_perms
 class TestConfigPermissionWarning:
     """Verify that load_config warns about too-open config file permissions."""
 

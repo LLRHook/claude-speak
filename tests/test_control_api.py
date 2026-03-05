@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import sys
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -25,6 +26,11 @@ import pytest
 from claude_speak.config import Config, TTSConfig
 from claude_speak.daemon import _create_ipc_server
 from claude_speak.ipc import IPCServer, send_message
+
+_skip_windows = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Uses AF_UNIX sockets not available on Windows",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +104,7 @@ def daemon_server(sock_path, tmp_path):
 # Tests: pause handler
 # =========================================================================
 
+@_skip_windows
 class TestPauseHandler:
     """Test the 'pause' IPC handler."""
 
@@ -122,6 +129,7 @@ class TestPauseHandler:
 # Tests: resume handler
 # =========================================================================
 
+@_skip_windows
 class TestResumeHandler:
     """Test the 'resume' IPC handler."""
 
@@ -146,6 +154,7 @@ class TestResumeHandler:
 # Tests: set_voice handler
 # =========================================================================
 
+@_skip_windows
 class TestSetVoiceHandler:
     """Test the 'set_voice' IPC handler."""
 
@@ -190,6 +199,7 @@ class TestSetVoiceHandler:
 # Tests: set_speed handler
 # =========================================================================
 
+@_skip_windows
 class TestSetSpeedHandler:
     """Test the 'set_speed' IPC handler."""
 
@@ -245,6 +255,7 @@ class TestSetSpeedHandler:
 # Tests: set_volume handler
 # =========================================================================
 
+@_skip_windows
 class TestSetVolumeHandler:
     """Test the 'set_volume' IPC handler."""
 
@@ -340,6 +351,7 @@ class TestSetVolumeHandler:
 # Tests: queue_depth handler
 # =========================================================================
 
+@_skip_windows
 class TestQueueDepthHandler:
     """Test the 'queue_depth' IPC handler."""
 
@@ -355,6 +367,7 @@ class TestQueueDepthHandler:
 # Tests: list_voices handler
 # =========================================================================
 
+@_skip_windows
 class TestListVoicesHandler:
     """Test the 'list_voices' IPC handler."""
 
@@ -571,6 +584,7 @@ class TestCLIFallback:
 # Tests: Round-trip — CLI -> socket -> handler -> response -> CLI output
 # =========================================================================
 
+@_skip_windows
 class TestRoundTrip:
     """Test full round-trip: CLI -> socket -> daemon handler -> response -> CLI output."""
 

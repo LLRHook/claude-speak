@@ -533,6 +533,8 @@ def acquire_lock() -> bool:
         if fd is None:
             return False
         acquire_lock._fd = fd  # prevent GC
+        fd.seek(0)
+        fd.truncate()
         fd.write(str(os.getpid()))
         fd.flush()
         _safe_chmod(LOCK_FILE, 0o600)

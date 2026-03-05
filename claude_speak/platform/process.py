@@ -22,21 +22,38 @@ def acquire_file_lock(path: Path) -> IO | None:
     Returns the open file descriptor (keep it open to hold the lock),
     or None if the lock could not be acquired.
     """
-    fd = open(path, "w")
-    try:
-        if sys.platform == "win32":
-            import msvcrt
+    if sys.platform == "win32":
+        import msvcrt
 
-            # Lock the first byte (non-blocking)
+        # On Windows, use a two-step approach:
+        # 1. Ensure the file exists with at least one byte (msvcrt.locking
+        #    requires the byte range to exist).
+        # 2. Open in "r+" mode (no truncation) to avoid conflicts with
+        #    existing locks, then lock byte 0.
+        # If the file doesn't exist yet, create it with a sentinel byte.
+        if not path.exists():
+            path.write_text(" ")
+        fd = open(path, "r+")
+        try:
+            fd.seek(0)
             msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
+            return fd
+        except OSError:
+            try:
+                fd.close()
+            except OSError:
+                pass
+            return None
+    else:
+        import fcntl
 
+        fd = open(path, "w")
+        try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return fd
-    except OSError:
-        fd.close()
-        return None
+            return fd
+        except OSError:
+            fd.close()
+            return None
 
 
 # ---------------------------------------------------------------------------

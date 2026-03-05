@@ -167,11 +167,17 @@ class TestAcquireLock:
         lock_file = tmp_path / "test.lock"
         with patch("claude_speak.daemon.LOCK_FILE", lock_file):
             acquire_lock()
-            content = lock_file.read_text()
-            assert content == str(os.getpid())
+            # On Windows the lock file byte range is held by msvcrt.locking,
+            # so opening a second handle would raise PermissionError.  Read
+            # the content through the already-open fd instead.
             if hasattr(acquire_lock, "_fd"):
+                acquire_lock._fd.seek(0)
+                content = acquire_lock._fd.read()
                 acquire_lock._fd.close()
                 delattr(acquire_lock, "_fd")
+            else:
+                content = lock_file.read_text()
+            assert content.strip() == str(os.getpid())
 
 
 # ---------------------------------------------------------------------------
