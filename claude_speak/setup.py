@@ -102,13 +102,17 @@ def _step_install_hooks() -> bool:
     """Merge claude-speak hook entries into ~/.claude/settings.json."""
     print("\n4. Installing Claude Code hooks...")
 
+    # Use "python" on Windows (python3 is a Microsoft Store stub), "python3" elsewhere
+    import sys as _sys
+    _python = "python" if _sys.platform == "win32" else "python3"
+
     # Define the hooks claude-speak needs
     hook_entries = {
         "SessionStart": {
             "hooks": [
                 {
                     "type": "command",
-                    "command": "python3 -m claude_speak.hooks.daemon_start",
+                    "command": f"{_python} -m claude_speak.hooks.daemon_start",
                     "async": True,
                 }
             ]
@@ -117,7 +121,7 @@ def _step_install_hooks() -> bool:
             "hooks": [
                 {
                     "type": "command",
-                    "command": "python3 -m claude_speak.hooks.daemon_stop",
+                    "command": f"{_python} -m claude_speak.hooks.daemon_stop",
                     "async": True,
                 }
             ]
@@ -126,7 +130,7 @@ def _step_install_hooks() -> bool:
             "hooks": [
                 {
                     "type": "command",
-                    "command": "python3 -m claude_speak.hooks.speak_response",
+                    "command": f"{_python} -m claude_speak.hooks.speak_response",
                     "timeout": 30,
                     "async": True,
                 }
@@ -136,7 +140,7 @@ def _step_install_hooks() -> bool:
             "hooks": [
                 {
                     "type": "command",
-                    "command": "python3 -m claude_speak.hooks.daemon_restart",
+                    "command": f"{_python} -m claude_speak.hooks.daemon_restart",
                 }
             ]
         },
