@@ -378,7 +378,8 @@ class TestTapCallback:
         playing.touch()
 
         with patch.dict(sys.modules, {"Quartz": mock_quartz, "AppKit": mock_appkit}), \
-             patch("claude_speak.media_keys.PLAYING_FILE", playing):
+             patch("claude_speak.media_keys.PLAYING_FILE", playing), \
+             patch("claude_speak.platform.macos.media_keys._is_tts_active", return_value=True):
             from claude_speak.media_keys import MediaKeyHandler
             toggle = MagicMock()
             handler = MediaKeyHandler({"toggle_mute": toggle})
@@ -423,13 +424,9 @@ class TestTapCallback:
     def test_callback_ignores_when_tts_inactive(self, tmp_path):
         """Media keys should be ignored when TTS is not active."""
         mock_quartz, mock_appkit, _ = self._make_handler_and_event(key_code=16, key_state=0x0A)
-        playing = tmp_path / "playing"  # does not exist
-        queue = tmp_path / "queue"
-        queue.mkdir()  # empty queue
 
         with patch.dict(sys.modules, {"Quartz": mock_quartz, "AppKit": mock_appkit}), \
-             patch("claude_speak.media_keys.PLAYING_FILE", playing), \
-             patch("claude_speak.media_keys.QUEUE_DIR", queue):
+             patch("claude_speak.platform.macos.media_keys._is_tts_active", return_value=False):
             from claude_speak.media_keys import MediaKeyHandler
             toggle = MagicMock()
             handler = MediaKeyHandler({"toggle_mute": toggle})

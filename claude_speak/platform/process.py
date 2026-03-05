@@ -47,7 +47,7 @@ def acquire_file_lock(path: Path) -> IO | None:
     else:
         import fcntl
 
-        fd = open(path, "w")
+        fd = open(path, "w+")
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return fd
