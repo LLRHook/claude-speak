@@ -19,7 +19,10 @@ Usage:
 
 from __future__ import annotations
 
-import resource
+try:
+    import resource
+except ImportError:
+    resource = None  # type: ignore[assignment]  # Windows
 import time
 import tracemalloc
 from dataclasses import dataclass
@@ -74,8 +77,15 @@ class MemoryMonitor:
 
         On macOS, ru_maxrss is in bytes.
         """
-        usage = resource.getrusage(resource.RUSAGE_SELF)
-        return usage.ru_maxrss / (1024 * 1024)
+        if resource is not None:
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            return usage.ru_maxrss / (1024 * 1024)
+        # Windows fallback: use psutil
+        try:
+            import psutil
+            return psutil.Process().memory_info().rss / (1024 * 1024)
+        except ImportError:
+            return 0.0
 
     def snapshot(self) -> MemorySnapshot:
         """Capture a point-in-time memory snapshot."""

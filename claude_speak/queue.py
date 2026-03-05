@@ -7,16 +7,23 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 import time
 from pathlib import Path
 
 from .config import QUEUE_DIR
 
 
+def _safe_chmod(path, mode):
+    """Set file permissions on Unix; no-op on Windows."""
+    if sys.platform != "win32":
+        os.chmod(path, mode)
+
+
 def ensure_queue_dir() -> None:
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     # Restrict queue directory to owner-only access
-    os.chmod(QUEUE_DIR, 0o700)
+    _safe_chmod(QUEUE_DIR, 0o700)
 
 
 def enqueue(text: str) -> Path:
@@ -26,7 +33,7 @@ def enqueue(text: str) -> Path:
     timestamp = f"{time.time():.6f}"
     path = QUEUE_DIR / f"{timestamp}.txt"
     path.write_text(text, encoding="utf-8")
-    os.chmod(path, 0o600)
+    _safe_chmod(path, 0o600)
     return path
 
 
@@ -42,7 +49,7 @@ def enqueue_chunks(chunks: list[str]) -> list[Path]:
         timestamp = f"{base_time + i * 0.000001:.6f}"
         path = QUEUE_DIR / f"{timestamp}.txt"
         path.write_text(chunk, encoding="utf-8")
-        os.chmod(path, 0o600)
+        _safe_chmod(path, 0o600)
         paths.append(path)
     return paths
 

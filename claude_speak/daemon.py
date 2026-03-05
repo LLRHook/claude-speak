@@ -7,12 +7,10 @@ chunks long messages, and plays audio sequentially.
 """
 
 import asyncio
-import fcntl
 import logging
 import logging.handlers
 import os
 import signal
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -34,14 +32,30 @@ from .config import (
 from .ipc import IPCServer
 from .memmon import get_monitor, init_monitor
 from .normalizer import chunk_text, normalize
+from .platform.paths import lock_file as _lock_file
+from .platform.paths import start_ts_file as _start_ts_file
+from .platform.process import (
+    acquire_file_lock,
+    find_processes_by_name,
+    force_kill_process,
+    is_process_alive,
+    terminate_process,
+)
 from .tts import TTSEngine, create_backend
 
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = 0.1  # fallback; SIGUSR1 from hook triggers instant processing
-LOCK_FILE = Path("/tmp/claude-speak-daemon.lock")
-START_TS_FILE = Path("/tmp/claude-speak-daemon.start_ts")
+
+LOCK_FILE = _lock_file()
+START_TS_FILE = _start_ts_file()
 PROCESS_PATTERN = "claude-speak"
+
+
+def _safe_chmod(path, mode):
+    """Set file permissions on Unix; no-op on Windows."""
+    if sys.platform != "win32":
+        os.chmod(path, mode)
 CONFIG_RELOAD_INTERVAL = 30  # seconds between mtime checks
 
 
@@ -316,7 +330,8 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
     # SIGUSR1 from hook signals "new item in queue" — skip poll delay
     queue_ready = asyncio.Event()
     loop = asyncio.get_running_loop()
-    loop.add_signal_handler(signal.SIGUSR1, queue_ready.set)
+    if sys.platform != "win32":
+        loop.add_signal_handler(signal.SIGUSR1, queue_ready.set)
 
     # Start IPC server (Unix domain socket) alongside file-based queue
     ipc_server = _create_ipc_server(engine, config, queue_ready, loop)
@@ -495,16 +510,17 @@ async def run_loop(config: Config, engine: TTSEngine, voice_controller=None):
 
 def write_pid():
     PID_FILE.write_text(str(os.getpid()))
-    os.chmod(PID_FILE, 0o600)
+    _safe_chmod(PID_FILE, 0o600)
 
 
 def read_pid() -> int | None:
     if PID_FILE.exists():
         try:
             pid = int(PID_FILE.read_text().strip())
-            os.kill(pid, 0)
-            return pid
-        except (ValueError, ProcessLookupError, PermissionError):
+            if is_process_alive(pid):
+                return pid
+            PID_FILE.unlink(missing_ok=True)
+        except (ValueError, OSError):
             PID_FILE.unlink(missing_ok=True)
     return None
 
@@ -513,14 +529,13 @@ def acquire_lock() -> bool:
     """Try to acquire an exclusive lock. Returns True if acquired."""
     try:
         LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-        lock_fd = open(LOCK_FILE, "w")
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        # Keep fd open — lock held for process lifetime
-        # Store on module so it doesn't get garbage collected
-        acquire_lock._fd = lock_fd
-        lock_fd.write(str(os.getpid()))
-        lock_fd.flush()
-        os.chmod(LOCK_FILE, 0o600)
+        fd = acquire_file_lock(LOCK_FILE)
+        if fd is None:
+            return False
+        acquire_lock._fd = fd  # prevent GC
+        fd.write(str(os.getpid()))
+        fd.flush()
+        _safe_chmod(LOCK_FILE, 0o600)
         return True
     except OSError:
         return False
@@ -535,43 +550,32 @@ def kill_all():
     pid = read_pid()
     if pid and pid != my_pid:
         try:
-            os.kill(pid, signal.SIGTERM)
+            terminate_process(pid)
             killed.append(pid)
-        except ProcessLookupError:
+        except (ProcessLookupError, OSError):
             pass
     PID_FILE.unlink(missing_ok=True)
 
-    # Method 2: pkill by pattern (catches orphans)
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", PROCESS_PATTERN],
-            capture_output=True, text=True
-        )
-        for line in result.stdout.strip().split("\n"):
-            if not line.strip():
-                continue
-            pid = int(line.strip())
-            if pid == my_pid:
-                continue
-            try:
-                os.kill(pid, signal.SIGTERM)
-                killed.append(pid)
-            except ProcessLookupError:
-                pass
-    except Exception:
-        pass
+    # Method 2: find by process name (catches orphans)
+    for pid in find_processes_by_name(PROCESS_PATTERN):
+        if pid == my_pid:
+            continue
+        try:
+            terminate_process(pid)
+            killed.append(pid)
+        except (ProcessLookupError, OSError):
+            pass
 
     # Wait briefly, then force-kill survivors
     if killed:
         time.sleep(0.5)
         for pid in killed:
             try:
-                os.kill(pid, 0)  # check if still alive
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
+                if is_process_alive(pid):
+                    force_kill_process(pid)
+            except (ProcessLookupError, OSError):
                 pass
 
-    # Clean up lock, PID, and start timestamp
     LOCK_FILE.unlink(missing_ok=True)
     PID_FILE.unlink(missing_ok=True)
     START_TS_FILE.unlink(missing_ok=True)
@@ -588,18 +592,14 @@ def stop_daemon():
     if pid:
         print(f"[daemon] Stopping (PID {pid})...")
         try:
-            os.kill(pid, signal.SIGTERM)
-            # Wait up to 3 seconds for graceful shutdown
+            terminate_process(pid)
             for _ in range(30):
                 time.sleep(0.1)
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
+                if not is_process_alive(pid):
                     break
             else:
-                # Still alive — force kill
-                os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
+                force_kill_process(pid)
+        except (ProcessLookupError, OSError):
             pass
         PID_FILE.unlink(missing_ok=True)
         LOCK_FILE.unlink(missing_ok=True)
@@ -622,9 +622,10 @@ def handle_shutdown(signum, frame):
     START_TS_FILE.unlink(missing_ok=True)
     MUTE_FILE.unlink(missing_ok=True)
     PLAYING_FILE.unlink(missing_ok=True)
-    # Clean up IPC socket file
-    from .ipc import SOCKET_PATH
-    SOCKET_PATH.unlink(missing_ok=True)
+    # Clean up IPC socket file (Unix only; TCP has no file on Windows)
+    if sys.platform != "win32":
+        from .ipc import SOCKET_PATH
+        SOCKET_PATH.unlink(missing_ok=True)
     sys.exit(0)
 
 
@@ -670,7 +671,7 @@ def _configure_logging(config: Config, foreground: bool = False):
     root.addHandler(file_handler)
     # Restrict log file permissions (may contain runtime details)
     try:
-        os.chmod(LOG_FILE, 0o600)
+        _safe_chmod(LOG_FILE, 0o600)
     except OSError:
         pass
 
@@ -690,26 +691,18 @@ def start(daemonize: bool = False):
 
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
+    if sys.platform == "win32" and hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, handle_shutdown)
 
     if daemonize:
-        # Launch daemon as a detached subprocess to avoid fork-related crashes
-        # with C libraries (PortAudio, ONNX Runtime, CoreML).
-        import subprocess as _sp
+        from .platform.process import launch_detached
+
         project_root = str(Path(__file__).resolve().parent.parent)
         env = os.environ.copy()
         env.setdefault("PYTHONPATH", "")
         if project_root not in env["PYTHONPATH"]:
-            env["PYTHONPATH"] = project_root + ((":" + env["PYTHONPATH"]) if env["PYTHONPATH"] else "")
-        devnull_fd = os.open(os.devnull, os.O_RDWR)
-        _sp.Popen(
-            [sys.executable, "-m", "claude_speak.daemon"],
-            stdin=devnull_fd,
-            stdout=devnull_fd,
-            stderr=devnull_fd,
-            start_new_session=True,
-            env=env,
-        )
-        os.close(devnull_fd)
+            env["PYTHONPATH"] = project_root + (os.pathsep + env["PYTHONPATH"] if env["PYTHONPATH"] else "")
+        launch_detached([sys.executable, "-m", "claude_speak.daemon"], env=env)
         time.sleep(1.5)
         daemon_pid = read_pid() or "?"
         print(f"[daemon] Started (PID {daemon_pid})", flush=True)
@@ -726,7 +719,7 @@ def start(daemonize: bool = False):
 
     write_pid()
     START_TS_FILE.write_text(str(time.time()))
-    os.chmod(START_TS_FILE, 0o600)
+    _safe_chmod(START_TS_FILE, 0o600)
     Q.ensure_queue_dir()
 
     config = load_config()

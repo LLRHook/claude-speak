@@ -11,12 +11,15 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+skip_windows = pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX not available on Windows")
 
 from claude_speak.ipc import (
     IPCServer,
@@ -91,6 +94,7 @@ def _wait_for_socket(path: Path, timeout: float = 2.0) -> None:
 # Tests: server start/stop lifecycle
 # =========================================================================
 
+@skip_windows
 class TestServerLifecycle:
     """Test IPCServer start, stop, and is_running."""
 
@@ -144,6 +148,7 @@ class TestServerLifecycle:
 # Tests: send_message with mock server
 # =========================================================================
 
+@skip_windows
 class TestSendMessage:
     """Test the client-side send_message function."""
 
@@ -179,6 +184,7 @@ class TestSendMessage:
 # Tests: speak message handling
 # =========================================================================
 
+@skip_windows
 class TestSpeakHandler:
     """Test the 'speak' message type end-to-end via IPC."""
 
@@ -227,6 +233,7 @@ class TestSpeakHandler:
 # Tests: stop message handling
 # =========================================================================
 
+@skip_windows
 class TestStopHandler:
     """Test the 'stop' message type."""
 
@@ -250,6 +257,7 @@ class TestStopHandler:
 # Tests: status response
 # =========================================================================
 
+@skip_windows
 class TestStatusHandler:
     """Test the 'status' message type."""
 
@@ -278,6 +286,7 @@ class TestStatusHandler:
 # Tests: acknowledgment format
 # =========================================================================
 
+@skip_windows
 class TestAcknowledgmentFormat:
     """Verify the JSON acknowledgment format."""
 
@@ -318,6 +327,7 @@ class TestAcknowledgmentFormat:
 # Tests: connection timeout
 # =========================================================================
 
+@skip_windows
 class TestConnectionTimeout:
     """Test that send_message respects its timeout parameter."""
 
@@ -339,6 +349,7 @@ class TestConnectionTimeout:
 # Tests: socket cleanup on shutdown
 # =========================================================================
 
+@skip_windows
 class TestSocketCleanup:
     """Verify socket file is cleaned up properly."""
 
@@ -367,6 +378,7 @@ class TestSocketCleanup:
 # Tests: fallback behavior (socket unavailable)
 # =========================================================================
 
+@skip_windows
 class TestFallbackBehavior:
     """Test that the hook falls back to file queue when IPC is unavailable."""
 
@@ -421,6 +433,7 @@ class TestFallbackBehavior:
 # Tests: is_daemon_running
 # =========================================================================
 
+@skip_windows
 class TestIsDaemonRunning:
     """Test the is_daemon_running() probe."""
 
@@ -449,6 +462,7 @@ class TestIsDaemonRunning:
 # Tests: concurrent connections
 # =========================================================================
 
+@skip_windows
 class TestConcurrentConnections:
     """Verify the server handles multiple simultaneous clients."""
 
@@ -499,6 +513,7 @@ class TestConcurrentConnections:
 # Tests: daemon IPC integration (handlers wired in daemon._create_ipc_server)
 # =========================================================================
 
+@skip_windows
 class TestDaemonIPCIntegration:
     """Test the IPC handlers as wired by the daemon's _create_ipc_server."""
 

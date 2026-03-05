@@ -25,6 +25,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows :: Windows 11",
 ]
 
 dependencies = [
@@ -33,6 +34,7 @@ dependencies = [
     "numpy>=1.24",
     "onnxruntime>=1.16",
     "tomli>=1.0; python_version < '3.11'",
+    "psutil>=5.9; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -44,6 +46,15 @@ piper = [
 ]
 stt = [
     "mlx-whisper>=0.4",
+]
+stt-faster-whisper = [
+    "faster-whisper>=1.0",
+]
+windows = [
+    "faster-whisper>=1.0",
+    "pyperclip>=1.8",
+    "pynput>=1.7",
+    "psutil>=5.9",
 ]
 elevenlabs = [
     "elevenlabs>=1.0",

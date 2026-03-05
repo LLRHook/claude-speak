@@ -23,16 +23,32 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from claude_speak.platform.paths import (
+    hook_lock as _hook_lock,
+)
+from claude_speak.platform.paths import (
+    perf_log as _perf_log,
+)
+from claude_speak.platform.paths import (
+    pid_file as _pid_file,
+)
+from claude_speak.platform.paths import (
+    pos_file as _pos_file,
+)
+
 # ---------------------------------------------------------------------------
 # Constants (mirror the shell script defaults)
 # ---------------------------------------------------------------------------
+from claude_speak.platform.paths import (
+    queue_dir as _queue_dir,
+)
 
 TOGGLE_FILE = Path.home() / ".claude-speak-enabled"
-QUEUE_DIR = Path("/tmp/claude-speak-queue")
-POS_FILE = Path("/tmp/claude-speak-pos")
-PID_FILE = Path("/tmp/claude-speak-daemon.pid")
-PERF_LOG = Path("/tmp/claude-speak-perf.log")
-HOOK_LOCK = Path("/tmp/claude-speak-hook.lock")
+QUEUE_DIR = _queue_dir()
+POS_FILE = _pos_file()
+PID_FILE = _pid_file()
+PERF_LOG = _perf_log()
+HOOK_LOCK = _hook_lock()
 
 DEBUG = bool(os.environ.get("CLAUDE_SPEAK_DEBUG", ""))
 PERF_ENABLED = bool(os.environ.get("CLAUDE_SPEAK_PERF", ""))
@@ -269,7 +285,8 @@ def enqueue_text(text: str, queue_dir: Path = QUEUE_DIR) -> Path | None:
     """
     try:
         queue_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(queue_dir, 0o700)
+        if sys.platform != "win32":
+            os.chmod(queue_dir, 0o700)
     except OSError as exc:
         _debug(f"Failed to create queue dir: {exc}")
         return None
@@ -278,7 +295,8 @@ def enqueue_text(text: str, queue_dir: Path = QUEUE_DIR) -> Path | None:
     path = queue_dir / f"{timestamp}.txt"
     try:
         path.write_text(text, encoding="utf-8")
-        os.chmod(path, 0o600)
+        if sys.platform != "win32":
+            os.chmod(path, 0o600)
     except OSError as exc:
         _debug(f"Failed to write queue file: {exc}")
         return None
@@ -288,8 +306,11 @@ def enqueue_text(text: str, queue_dir: Path = QUEUE_DIR) -> Path | None:
 def signal_daemon(pid_file: Path = PID_FILE) -> bool:
     """Send SIGUSR1 to the daemon so it processes the queue immediately.
 
-    Returns True if the signal was sent successfully.
+    On Windows, SIGUSR1 is not available; the IPC socket path handles
+    notification instead. Returns True if the signal was sent successfully.
     """
+    if sys.platform == "win32":
+        return False  # Windows uses IPC-only notification
     try:
         pid = int(pid_file.read_text(encoding="utf-8").strip())
         os.kill(pid, signal.SIGUSR1)

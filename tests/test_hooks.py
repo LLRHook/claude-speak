@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import sys
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -409,7 +410,8 @@ class TestEnqueueText:
 
     def test_enqueue_failure_returns_none(self):
         # Using a path that cannot be created
-        result = enqueue_text("Test", queue_dir=Path("/proc/nonexistent/queue"))
+        bad_path = Path("/proc/nonexistent/queue") if sys.platform != "win32" else Path("Z:\\nonexistent\\queue")
+        result = enqueue_text("Test", queue_dir=bad_path)
         assert result is None
 
 
@@ -431,6 +433,7 @@ class TestSignalDaemon:
         tmp_pid_file.write_text("999999999", encoding="utf-8")
         assert signal_daemon(pid_file=tmp_pid_file) is False
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="SIGUSR1 not available on Windows")
     @patch("os.kill")
     def test_signal_success(self, mock_kill: MagicMock, tmp_pid_file: Path):
         tmp_pid_file.write_text("12345", encoding="utf-8")
@@ -496,6 +499,7 @@ class TestErrorHandling:
 # Tests: full run() integration (end-to-end with mocked filesystem paths)
 # =========================================================================
 
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGUSR1 not available on Windows")
 class TestRunIntegration:
     """End-to-end test of run() with a real transcript and queue."""
 
@@ -631,15 +635,18 @@ class TestRunIntegration:
 class TestBackwardCompatibility:
     """Verify the Python hook maintains compatibility with the shell version."""
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="macOS backward-compat paths")
     def test_same_queue_directory(self):
         """Python hook uses the same queue path as the shell script."""
         from claude_speak.hooks.speak_response import QUEUE_DIR
         assert str(QUEUE_DIR) == "/tmp/claude-speak-queue"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="macOS backward-compat paths")
     def test_same_pos_file(self):
         from claude_speak.hooks.speak_response import POS_FILE
         assert str(POS_FILE) == "/tmp/claude-speak-pos"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="macOS backward-compat paths")
     def test_same_pid_file(self):
         from claude_speak.hooks.speak_response import PID_FILE
         assert str(PID_FILE) == "/tmp/claude-speak-daemon.pid"
@@ -648,6 +655,7 @@ class TestBackwardCompatibility:
         from claude_speak.hooks.speak_response import TOGGLE_FILE
         assert str(TOGGLE_FILE) == str(Path.home() / ".claude-speak-enabled")
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="macOS backward-compat paths")
     def test_same_lock_path(self):
         from claude_speak.hooks.speak_response import HOOK_LOCK
         assert str(HOOK_LOCK) == "/tmp/claude-speak-hook.lock"
