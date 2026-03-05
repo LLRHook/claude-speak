@@ -418,6 +418,7 @@ class TestTapCallback:
             handler._tap_callback(None, 0, mock_event, None)
             toggle.assert_not_called()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="macOS-only media key handling")
     def test_callback_ignores_when_tts_inactive(self, tmp_path):
         """Media keys should be ignored when TTS is not active."""
         mock_quartz, mock_appkit, _ = self._make_handler_and_event(key_code=16, key_state=0x0A)

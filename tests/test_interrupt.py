@@ -22,7 +22,7 @@ from claude_speak.voice_controller import VoiceController
 
 def _make_controller(
     wakeword_enabled=True,
-    chimes=True,
+    chimes=False,
     backend="builtin",
     tts_stop_callback=None,
     interrupt_callback=None,

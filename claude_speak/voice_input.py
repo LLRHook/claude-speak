@@ -518,9 +518,9 @@ def builtin_voice_input_cycle(config: InputConfig | None = None) -> bool:
         return False
 
     # --- Paste text at cursor (cross-platform) ---
-    from .platform.input_helpers import set_clipboard as _xplat_set_clipboard
     from .platform.input_helpers import paste_at_cursor as _xplat_paste
     from .platform.input_helpers import press_enter as _xplat_enter
+    from .platform.input_helpers import set_clipboard as _xplat_set_clipboard
 
     if not _xplat_set_clipboard(text):
         logger.error("Failed to copy text to clipboard")

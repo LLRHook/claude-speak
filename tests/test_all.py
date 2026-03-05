@@ -1133,13 +1133,15 @@ def test_pron_custom_pron_config_overridable(tmp_path, monkeypatch):
     """custom_pronunciations in config TOML should be readable."""
     import claude_speak.config as config_module
     custom_path = str(tmp_path / "my_prons.toml")
-    toml_content = f'[normalization]\ncustom_pronunciations = "{custom_path}"\n'.encode()
+    # Use forward slashes in TOML to avoid backslash escape issues on Windows
+    toml_safe_path = custom_path.replace("\\", "/")
+    toml_content = f'[normalization]\ncustom_pronunciations = "{toml_safe_path}"\n'.encode()
     toml_file = tmp_path / "claude-speak.toml"
     toml_file.write_bytes(toml_content)
     monkeypatch.setattr(config_module, "CONFIG_PATH", toml_file)
 
     cfg = config_module.load_config()
-    assert cfg.normalization.custom_pronunciations == custom_path
+    assert cfg.normalization.custom_pronunciations == toml_safe_path
 
 
 # ===================================================================

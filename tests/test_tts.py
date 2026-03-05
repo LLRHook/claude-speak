@@ -159,7 +159,10 @@ class TestStreamManagement:
         mock_stream = MagicMock()
         mock_stream.active = True
         mock_sd.OutputStream.return_value = mock_stream
-        with patch.object(tts_module, "sd", mock_sd):
+        mock_dm = MagicMock(spec=AudioDeviceManager)
+        mock_dm.is_device_available.return_value = True
+        with patch.object(tts_module, "sd", mock_sd), \
+             patch("claude_speak.tts.get_device_manager", return_value=mock_dm):
             engine = _make_engine()
             engine._output_device = 0
             engine._ensure_stream(24000)

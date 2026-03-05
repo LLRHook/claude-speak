@@ -193,6 +193,7 @@ def cmd_pause() -> None:
         print("TTS paused.")
     else:
         # Fall back to direct file manipulation
+        MUTE_FILE.parent.mkdir(parents=True, exist_ok=True)
         MUTE_FILE.touch()
         print("TTS paused (via file fallback).")
 

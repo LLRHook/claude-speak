@@ -543,7 +543,9 @@ class TestPiperVoiceRegistry:
     def test_piper_models_dir_exists(self):
         """PIPER_MODELS_DIR should be under ~/.claude-speak/models/piper/."""
         from claude_speak.models import PIPER_MODELS_DIR
-        assert str(PIPER_MODELS_DIR).endswith("models/piper")
+        # Use PurePosixPath parts comparison for cross-platform compatibility
+        parts = PIPER_MODELS_DIR.parts
+        assert parts[-2:] == ("models", "piper")
 
     def test_list_downloaded_piper_voices_empty_when_no_dir(self):
         """list_downloaded_piper_voices returns empty list when dir doesn't exist."""

@@ -279,6 +279,10 @@ class TestSingleton:
 # Tests: IPC handler integration
 # =========================================================================
 
+@pytest.mark.skipif(
+    __import__("sys").platform == "win32",
+    reason="Uses AF_UNIX sockets not available on Windows",
+)
 class TestIPCHandlerIntegration:
     """Test the mem_stats IPC handler wired in daemon._create_ipc_server."""
 
