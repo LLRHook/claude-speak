@@ -27,8 +27,8 @@ EXAMPLE_CONFIG_PATH = PROJECT_DIR / "claude-speak.toml.example"
 
 def _print_step(label: str, status: str = "ok") -> None:
     """Print a setup step result."""
-    icons = {"ok": "\u2713", "skip": "-", "fail": "\u2717", "info": "\u2192"}
-    icon = icons.get(status, " ")
+    icons = {"ok": "[OK]", "skip": "[--]", "fail": "[!!]", "info": "[->]"}
+    icon = icons.get(status, "    ")
     print(f"  {icon} {label}")
 
 

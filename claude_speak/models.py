@@ -39,16 +39,16 @@ MODEL_REGISTRY: dict[str, ModelInfo] = {
     "kokoro-v1.0.onnx": ModelInfo(
         name="kokoro-v1.0.onnx",
         filename="kokoro-v1.0.onnx",
-        url="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/kokoro-v1.0.onnx",
+        url="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx",
         sha256="",
-        size_bytes=341_858_009,  # ~326 MB
+        size_bytes=325_532_387,  # ~310 MB
     ),
     "voices-v1.0.bin": ModelInfo(
         name="voices-v1.0.bin",
         filename="voices-v1.0.bin",
-        url="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/voices-v1.0.bin",
+        url="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",
         sha256="",
-        size_bytes=341_583_872,  # ~326 MB
+        size_bytes=28_214_398,  # ~27 MB
     ),
     "silero_vad.onnx": ModelInfo(
         name="silero_vad.onnx",
