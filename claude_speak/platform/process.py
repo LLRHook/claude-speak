@@ -67,6 +67,8 @@ def is_process_alive(pid: int) -> bool:
     Uses os.kill(pid, 0) on Unix and kernel32.OpenProcess on Windows
     (with a psutil fallback).
     """
+    if pid <= 0:
+        return False
     if sys.platform == "win32":
         return _is_process_alive_win32(pid)
     else:
