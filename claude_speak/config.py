@@ -84,6 +84,7 @@ class AudioConfig:
     volume: float = 0.3
     bt_mic_workaround: bool = True  # use built-in mic when output is BT
     mic_device: str = ""  # mic device name substring (e.g. "Anker"); empty = system default
+    mic_gain: float = 1.0  # software mic amplification (e.g. 10.0 for quiet webcam mics)
     media_keys_enabled: bool = True  # intercept hardware media keys for TTS control
 
 

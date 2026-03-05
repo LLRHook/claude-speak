@@ -358,6 +358,13 @@ class WakeWordListener:
                             if overflowed:
                                 logger.debug("Audio input overflowed")
                             samples = np.squeeze(audio_data)
+                            # Apply software mic gain if configured
+                            mic_gain = getattr(self._audio_config, "mic_gain", 1.0)
+                            if mic_gain != 1.0:
+                                samples = np.clip(
+                                    samples.astype(np.int32) * int(mic_gain),
+                                    -32768, 32767,
+                                ).astype(np.int16)
                             self._process_audio(samples)
                 except sd.PortAudioError as e:
                     logger.error("Audio device error: %s (retrying in 1s)", e)
