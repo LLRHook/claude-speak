@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -m claude_speak.hooks.speak_response",
+            "command": "python -m claude_speak.hooks.speak_response",
             "timeout": 30,
             "async": true
           }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -m claude_speak.hooks.speak_response",
+            "command": "python -m claude_speak.hooks.speak_response",
             "timeout": 30,
             "async": true
           }
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -m claude_speak.hooks.daemon_start",
+            "command": "python -m claude_speak.hooks.daemon_start",
             "async": true
           }
         ]
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -m claude_speak.hooks.daemon_stop",
+            "command": "python -m claude_speak.hooks.daemon_stop",
             "async": true
           }
         ]
@@ -51,7 +51,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -m claude_speak.hooks.daemon_restart"
+            "command": "python -m claude_speak.hooks.daemon_restart"
           }
         ]
       }
